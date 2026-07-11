@@ -1,0 +1,68 @@
+name: Build Windows executable
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, claude/**]
+    paths:
+      - "chartpilot/**"
+      - "pyproject.toml"
+      - "packaging/**"
+      - ".github/workflows/build-windows.yml"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,packaging]"
+
+      - name: Run unit tests
+        shell: bash
+        run: pytest -q
+
+      - name: Real-network smoke test (live Binance data + WebSocket)
+        shell: bash
+        run: python packaging/live_smoke_test.py
+
+      - name: Build Windows executable
+        shell: bash
+        run: pyinstaller --noconfirm packaging/chartpilot.spec
+
+      - name: Smoke-test the built executable
+        shell: bash
+        run: python packaging/exe_smoke_test.py
+
+      - name: Zip the portable build
+        shell: pwsh
+        run: Compress-Archive -Path dist/ChartPilot/* -DestinationPath ChartPilot-windows-portable.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ChartPilot-windows-portable
+          path: ChartPilot-windows-portable.zip
+          retention-days: 30
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup -y --no-progress
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" packaging\chartpilot.iss
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ChartPilot-Setup
+          path: dist_installer/ChartPilot-Setup.exe
+          retention-days: 30
