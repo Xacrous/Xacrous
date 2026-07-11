@@ -34,8 +34,10 @@ from qfluentwidgets import (
 from chartpilot.chart_view.chart_widget import ChartWidget
 from chartpilot.data_fetcher.exchange_client import ExchangeClient, SymbolNotFoundError
 from chartpilot.signal_engine.base_strategy import Mode, Signal
+from chartpilot.signal_engine.pipeline import enrich_signal, resolve_pending_for_window
 from chartpilot.signal_engine.registry import get_strategy, list_strategies
-from chartpilot.ta_engine.indicators import IndicatorSet, compute
+from chartpilot.signal_engine.signal_log import SignalLog
+from chartpilot.ta_engine.indicators import CANDLE_LIMIT, IndicatorSet, compute
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +45,6 @@ TIMEFRAMES: dict[Mode, list[str]] = {
     "swing": ["1h", "4h", "1d"],
     "scalp": ["1m", "5m", "15m"],
 }
-CANDLE_LIMIT: dict[Mode, int] = {"swing": 250, "scalp": 150}
 _LIVE_STOP_TIMEOUT_MS = 5000
 DEFAULT_WATCHLIST = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
 
@@ -68,13 +69,14 @@ class _SignalWorker(QThread):
     succeeded = pyqtSignal(object, object, object)  # df, indicators, signal
     failed = pyqtSignal(str)
 
-    def __init__(self, exchange_client: ExchangeClient, symbol: str, timeframe: str, mode: Mode, strategy_id: str) -> None:
+    def __init__(self, exchange_client: ExchangeClient, symbol: str, timeframe: str, mode: Mode, strategy_id: str, signal_log: SignalLog | None) -> None:
         super().__init__()
         self.exchange_client = exchange_client
         self.symbol = symbol
         self.timeframe = timeframe
         self.mode = mode
         self.strategy_id = strategy_id
+        self.signal_log = signal_log
 
     def run(self) -> None:
         from chartpilot.signal_engine.registry import get_strategy
@@ -87,6 +89,9 @@ class _SignalWorker(QThread):
             indicators = compute(df, mode=self.mode)
             strategy = get_strategy(self.strategy_id)
             signal = strategy.evaluate(df, indicators)
+            resolve_pending_for_window(df, self.signal_log)
+            if signal is not None:
+                enrich_signal(df, self.mode, strategy, signal, self.signal_log)
             self.succeeded.emit(df, indicators, signal)
         except SymbolNotFoundError as exc:
             self.failed.emit(str(exc))
@@ -138,6 +143,7 @@ class SignalPanel(QWidget):
         self.sl_label = BodyLabel("", self)
         self.confidence_label = StrongBodyLabel("", self)
         self.rr_label = BodyLabel("", self)
+        self.win_rate_label = BodyLabel("", self)
         self.expiry_label = CaptionLabel("", self)
         self.rationale_labels: list[BodyLabel] = []
         self.rationale_container = QVBoxLayout()
@@ -151,6 +157,7 @@ class SignalPanel(QWidget):
         layout.addWidget(self.sl_label)
         layout.addWidget(self.confidence_label)
         layout.addWidget(self.rr_label)
+        layout.addWidget(self.win_rate_label)
         layout.addWidget(self.expiry_label)
         layout.addWidget(CaptionLabel("Rationale", self))
         layout.addLayout(self.rationale_container)
@@ -172,6 +179,7 @@ class SignalPanel(QWidget):
         self.sl_label.setText("")
         self.confidence_label.setText("")
         self.rr_label.setText("")
+        self.win_rate_label.setText("")
         self.expiry_label.setText("")
         self._clear_rationale()
 
@@ -183,6 +191,10 @@ class SignalPanel(QWidget):
         self.sl_label.setText(f"SL: {signal.stop_loss:g}")
         self.confidence_label.setText(f"Confidence: {signal.confidence}%")
         self.rr_label.setText(f"R:R: {signal.reward_risk_ratio:.2f}")
+        if signal.historical_win_rate is not None:
+            self.win_rate_label.setText(f"Historical WR: {signal.historical_win_rate * 100:.0f}%")
+        else:
+            self.win_rate_label.setText("Historical WR: not enough data yet")
         self.expiry_label.setText(f"Expires: {signal.expires_at}" if signal.expires_at else "")
         self._clear_rationale()
         for line in signal.rationale:
@@ -200,11 +212,13 @@ class AnalysisInterface(QWidget):
         default_timeframe: str,
         default_mode: Mode,
         default_strategy_id: str,
+        signal_log: SignalLog,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("analysisInterface")
         self.exchange_client = exchange_client
+        self.signal_log = signal_log
         self._worker: _SignalWorker | None = None
         self._live_thread: _LiveFeedThread | None = None
         self._current_df: pd.DataFrame | None = None
@@ -308,7 +322,7 @@ class AnalysisInterface(QWidget):
         self.refresh_button.setEnabled(False)
         self.status_label.setText("Loading…")
 
-        self._worker = _SignalWorker(self.exchange_client, symbol, timeframe, mode, strategy_id)
+        self._worker = _SignalWorker(self.exchange_client, symbol, timeframe, mode, strategy_id, self.signal_log)
         self._worker.succeeded.connect(self._on_success)
         self._worker.failed.connect(self._on_error)
         self._worker.finished.connect(lambda: self.refresh_button.setEnabled(True))
@@ -378,6 +392,9 @@ class AnalysisInterface(QWidget):
             return  # not enough candles in the trailing window yet
         strategy = get_strategy(self.selected_strategy_id)
         signal = strategy.evaluate(df, indicators)
+        resolve_pending_for_window(df, self.signal_log)
+        if signal is not None:
+            enrich_signal(df, self._mode, strategy, signal, self.signal_log)
         self.chart_widget.render(df, indicators, signal)
         if signal is not None:
             self.signal_panel.show_signal(signal)

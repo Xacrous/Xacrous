@@ -1,8 +1,4 @@
-"""MSFluentWindow shell: navigation rail + Analysis/Settings/About (Section 6.1).
-
-Backtest/History is Phase 3 scope (it depends on the backtester) and is not
-wired into the nav rail yet.
-"""
+"""MSFluentWindow shell: navigation rail + Analysis/Backtest/Settings/About (Section 6.1)."""
 
 from __future__ import annotations
 
@@ -13,8 +9,10 @@ from chartpilot.data_fetcher.cache import CandleCache
 from chartpilot.data_fetcher.exchange_client import ExchangeClient
 from chartpilot.settings.config_store import ConfigStore
 from chartpilot.settings.settings_dialog import SettingsDialog
+from chartpilot.signal_engine.signal_log import SignalLog
 from chartpilot.ui.about_view import AboutInterface
 from chartpilot.ui.analysis_view import AnalysisInterface
+from chartpilot.ui.backtest_view import BacktestInterface
 from chartpilot.ui.disclaimer import DisclaimerDialog
 
 
@@ -30,6 +28,7 @@ class MainWindow(MSFluentWindow):
 
         cache_path = self.config_store.config_dir / "cache.sqlite3"
         self.candle_cache = CandleCache(cache_path)
+        self.signal_log = SignalLog(self.config_store.config_dir / "signal_log.sqlite3")
         api_key = self.config_store.get_api_key()
         self.exchange_client = ExchangeClient(
             self.candle_cache,
@@ -38,11 +37,13 @@ class MainWindow(MSFluentWindow):
         )
 
         self.analysis_interface = AnalysisInterface(
-            self.exchange_client, prefs.symbol, prefs.timeframe, prefs.mode, prefs.strategy, self
+            self.exchange_client, prefs.symbol, prefs.timeframe, prefs.mode, prefs.strategy, self.signal_log, self
         )
+        self.backtest_interface = BacktestInterface(self.exchange_client, self.signal_log, self)
         self.about_interface = AboutInterface(self)
 
         self.addSubInterface(self.analysis_interface, FIF.MARKET, "Analysis")
+        self.addSubInterface(self.backtest_interface, FIF.HISTORY, "Backtest")
         self.addSubInterface(self.about_interface, FIF.INFO, "About", position=NavigationItemPosition.BOTTOM)
 
         self.navigationInterface.addItem(
@@ -73,6 +74,7 @@ class MainWindow(MSFluentWindow):
                 api_secret=api_key[1] if api_key else None,
             )
             self.analysis_interface.exchange_client = self.exchange_client
+            self.backtest_interface.exchange_client = self.exchange_client
 
     def closeEvent(self, event) -> None:
         self.analysis_interface.shutdown()
@@ -83,4 +85,5 @@ class MainWindow(MSFluentWindow):
         prefs.strategy = self.analysis_interface.selected_strategy_id
         self.config_store.save(prefs)
         self.candle_cache.close()
+        self.signal_log.close()
         super().closeEvent(event)
