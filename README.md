@@ -7,10 +7,11 @@ order — every signal is informational and requires manual action by the
 user in their own exchange account. See `docs/` (or the original technical
 specification) for the full design.
 
-**Status:** Phase 1 (MVP) — REST-only data fetching, swing-mode indicators,
-the Trend-Following strategy (4.1) live end-to-end, and manual-refresh chart
-rendering. Remaining swing/scalp strategies, WebSocket live updates, and the
-backtester are Phase 2/3 scope.
+**Status:** Phase 1 + Phase 2 — all 5 swing and 5 scalp strategies live in
+the registry, WebSocket live updates (ticker + kline) layered on top of
+manual refresh, pivot/Fibonacci/volume-profile chart overlays, and a
+Fluent UI pass (mode toggle, watchlist, theme). Backtesting and the forward
+signal log are Phase 3 scope, not yet built.
 
 ## Setup
 

@@ -21,9 +21,43 @@ def test_compute_requires_at_least_200_candles():
         compute(_flat_df(199), mode="swing")
 
 
-def test_compute_rejects_unimplemented_mode():
-    with pytest.raises(NotImplementedError):
-        compute(_flat_df(200), mode="scalp")
+def test_compute_rejects_unknown_mode():
+    with pytest.raises(ValueError):
+        compute(_flat_df(200), mode="daytrade")
+
+
+def test_compute_requires_at_least_50_candles_for_scalp():
+    with pytest.raises(ValueError):
+        compute(_flat_df(49), mode="scalp")
+
+
+def test_compute_scalp_returns_expected_series():
+    df = _flat_df(60)
+    ind = compute(df, mode="scalp")
+    assert ind.mode == "scalp"
+    assert len(ind.ema9) == len(df)
+    assert ind.latest(ind.ema9) == pytest.approx(100.0)
+    assert ind.latest(ind.bb_mid) == pytest.approx(100.0)
+    assert not np.isnan(ind.latest(ind.stoch_k))
+    assert ind.volume_profile is not None
+    assert len(ind.volume_profile.bins) > 0
+
+
+def test_compute_scalp_vwap_tracks_price_in_uptrend():
+    n = 60
+    close = pd.Series(np.linspace(100, 110, n))
+    df = pd.DataFrame({
+        "open_time": np.arange(n) * 60_000 + 1_700_000_000_000,
+        "open": close - 0.05,
+        "high": close + 0.2,
+        "low": close - 0.2,
+        "close": close,
+        "volume": [50.0] * n,
+    })
+    ind = compute(df, mode="scalp")
+    # VWAP is a volume-weighted average, so in a steady uptrend it should
+    # sit below the latest close
+    assert ind.latest(ind.vwap) < float(close.iloc[-1])
 
 
 def test_compute_swing_returns_expected_series():

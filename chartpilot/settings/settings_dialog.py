@@ -1,12 +1,14 @@
-"""Settings dialog: optional read-only API key + refresh interval (Phase 1 scope)."""
+"""Settings dialog: refresh interval, theme, and optional read-only API key."""
 
 from __future__ import annotations
 
 import keyring.errors
 from PyQt6.QtWidgets import QDialog, QFormLayout, QHBoxLayout, QVBoxLayout
-from qfluentwidgets import BodyLabel, InfoBar, PasswordLineEdit, PrimaryPushButton, PushButton, SpinBox
+from qfluentwidgets import BodyLabel, ComboBox, InfoBar, PasswordLineEdit, PrimaryPushButton, PushButton, SpinBox, Theme, setTheme
 
 from chartpilot.settings.config_store import ConfigStore
+
+_THEMES = ["dark", "light"]
 
 
 class SettingsDialog(QDialog):
@@ -23,6 +25,11 @@ class SettingsDialog(QDialog):
         self.refresh_interval_spin.setSuffix(" s")
         self.refresh_interval_spin.setValue(prefs.refresh_interval_seconds)
 
+        self.theme_combo = ComboBox(self)
+        self.theme_combo.addItems([t.capitalize() for t in _THEMES])
+        if prefs.theme in _THEMES:
+            self.theme_combo.setCurrentIndex(_THEMES.index(prefs.theme))
+
         self.api_key_edit = PasswordLineEdit(self)
         self.api_key_edit.setPlaceholderText("Optional — read-only key only")
         self.api_secret_edit = PasswordLineEdit(self)
@@ -35,6 +42,7 @@ class SettingsDialog(QDialog):
 
         form = QFormLayout()
         form.addRow("Refresh interval", self.refresh_interval_spin)
+        form.addRow("Theme", self.theme_combo)
         form.addRow("Binance API key", self.api_key_edit)
         form.addRow("Binance API secret", self.api_secret_edit)
 
@@ -72,7 +80,9 @@ class SettingsDialog(QDialog):
     def _save(self) -> None:
         prefs = self.config_store.load()
         prefs.refresh_interval_seconds = self.refresh_interval_spin.value()
+        prefs.theme = _THEMES[self.theme_combo.currentIndex()]
         self.config_store.save(prefs)
+        setTheme(Theme.DARK if prefs.theme == "dark" else Theme.LIGHT)
 
         key, secret = self.api_key_edit.text().strip(), self.api_secret_edit.text().strip()
         try:

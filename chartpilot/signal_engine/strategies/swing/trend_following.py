@@ -12,7 +12,8 @@ from __future__ import annotations
 import pandas as pd
 
 from chartpilot.signal_engine.base_strategy import BaseStrategy, Signal
-from chartpilot.signal_engine.scorer import ScoreFactor, rationale_lines, total_confidence
+from chartpilot.signal_engine.scorer import ScoreFactor
+from chartpilot.signal_engine.strategies.common import build_signal, freshness_score, macd_cross_age, rsi_trigger_age
 from chartpilot.ta_engine.indicators import IndicatorSet
 from chartpilot.ta_engine.levels import most_recent_swing_high, most_recent_swing_low
 
@@ -25,55 +26,6 @@ _RSI_DEEP_OVERBOUGHT = 80.0
 _LOCATION_TOLERANCE_PCT = 0.01
 _MIN_REWARD_RISK = 1.5
 _TREND_PERSISTENCE_CAP = 20
-
-
-def _freshness_score(age: int, max_score: float, lookback: int) -> float:
-    """Fresher triggers score higher: 100% of max_score at age 0, decaying
-    to 50% of max_score at the edge of the lookback window."""
-    frac = 1.0 - (age / lookback) * 0.5
-    return round(max_score * frac, 1)
-
-
-def _macd_cross_age(macd_line: pd.Series, macd_signal: pd.Series, bullish: bool, lookback: int) -> int | None:
-    n = len(macd_line)
-    for age in range(lookback + 1):
-        i = n - 1 - age
-        if i < 1:
-            break
-        prev_diff = macd_line.iloc[i - 1] - macd_signal.iloc[i - 1]
-        curr_diff = macd_line.iloc[i] - macd_signal.iloc[i]
-        crossed = (prev_diff <= 0 < curr_diff) if bullish else (prev_diff >= 0 > curr_diff)
-        if crossed:
-            return age
-    return None
-
-
-def _rsi_trigger_age(rsi: pd.Series, reclaim: bool, lookback: int, floor_lookback: int) -> int | None:
-    """Age of an RSI reclaim/reject trigger, or None if not present or if
-    it originates from a deep-oversold/overbought extreme (a different,
-    stronger reversal setup rather than a shallow pullback)."""
-    n = len(rsi)
-    level = _RSI_RECLAIM_LEVEL if reclaim else _RSI_REJECT_LEVEL
-    for age in range(lookback + 1):
-        i = n - 1 - age
-        if i < 1:
-            break
-        prev_val, curr_val = rsi.iloc[i - 1], rsi.iloc[i]
-        crossed = (prev_val < level <= curr_val) if reclaim else (prev_val > level >= curr_val)
-        if not crossed:
-            continue
-        floor_start = max(0, i - floor_lookback)
-        recent_window = rsi.iloc[floor_start:i]
-        if recent_window.empty:
-            return age
-        extreme = recent_window.min() if reclaim else recent_window.max()
-        deep = _RSI_DEEP_OVERSOLD if reclaim else _RSI_DEEP_OVERBOUGHT
-        if reclaim and extreme < deep:
-            return None
-        if not reclaim and extreme > deep:
-            return None
-        return age
-    return None
 
 
 def _trend_persistence(close: pd.Series, sma50: pd.Series, sma200: pd.Series, bullish: bool) -> int:
@@ -112,21 +64,23 @@ class TrendFollowingStrategy(BaseStrategy):
             return None
 
         # Gate 2: momentum trigger (MACD cross preferred, RSI reclaim/reject as fallback)
-        macd_age = _macd_cross_age(indicators.macd_line, indicators.macd_signal, bullish, _MOMENTUM_LOOKBACK)
+        macd_age = macd_cross_age(indicators.macd_line, indicators.macd_signal, bullish, _MOMENTUM_LOOKBACK)
         momentum_score: float
         momentum_desc: str
         if macd_age is not None:
-            momentum_score = _freshness_score(macd_age, 25.0, _MOMENTUM_LOOKBACK)
+            momentum_score = freshness_score(macd_age, 25.0, _MOMENTUM_LOOKBACK)
             cross_word = "bullish" if bullish else "bearish"
             momentum_desc = f"Momentum: MACD {cross_word} cross, {macd_age} candle(s) old"
         else:
-            rsi_age = _rsi_trigger_age(indicators.rsi14, reclaim=bullish, lookback=_MOMENTUM_LOOKBACK, floor_lookback=_RSI_FLOOR_LOOKBACK)
+            level = _RSI_RECLAIM_LEVEL if bullish else _RSI_REJECT_LEVEL
+            deep = _RSI_DEEP_OVERSOLD if bullish else _RSI_DEEP_OVERBOUGHT
+            rsi_age = rsi_trigger_age(indicators.rsi14, reclaim=bullish, lookback=_MOMENTUM_LOOKBACK,
+                                       floor_lookback=_RSI_FLOOR_LOOKBACK, level=level, deep_extreme=deep)
             if rsi_age is None:
                 return None
-            momentum_score = _freshness_score(rsi_age, 20.0, _MOMENTUM_LOOKBACK)
-            level = int(_RSI_RECLAIM_LEVEL) if bullish else int(_RSI_REJECT_LEVEL)
+            momentum_score = freshness_score(rsi_age, 20.0, _MOMENTUM_LOOKBACK)
             verb = "reclaims" if bullish else "loses"
-            momentum_desc = f"Momentum: RSI(14) {verb} {level} from a pullback, {rsi_age} candle(s) old"
+            momentum_desc = f"Momentum: RSI(14) {verb} {int(level)} from a pullback, {rsi_age} candle(s) old"
 
         # Gate 3: location — within tolerance of a pivot/S-R cluster
         nearest_pivot = indicators.pivots.nearest_level(price)
@@ -182,16 +136,4 @@ class TrendFollowingStrategy(BaseStrategy):
             ScoreFactor(volume_desc, round(volume_score, 1), 20.0),
         ]
 
-        return Signal(
-            symbol=str(df.attrs.get("symbol", "")),
-            timeframe=str(df.attrs.get("timeframe", "")),
-            mode="swing",
-            strategy=self.id,
-            direction="long" if bullish else "short",
-            entry=round(price, 8),
-            take_profit=round(float(take_profit), 8),
-            stop_loss=round(float(stop_loss), 8),
-            confidence=total_confidence(factors),
-            reward_risk_ratio=round(reward_risk, 2),
-            rationale=rationale_lines(factors),
-        )
+        return build_signal(df, "swing", self.id, bullish, price, take_profit, stop_loss, reward_risk, factors)

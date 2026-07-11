@@ -8,12 +8,28 @@ and it shows up everywhere the registry is consulted.
 from __future__ import annotations
 
 from chartpilot.signal_engine.base_strategy import BaseStrategy, Mode
+from chartpilot.signal_engine.strategies.scalp.bollinger_reversion import BollingerReversionStrategy
+from chartpilot.signal_engine.strategies.scalp.breakout_momentum import BreakoutMomentumScalpStrategy
+from chartpilot.signal_engine.strategies.scalp.ema_crossover import EmaCrossoverStrategy
+from chartpilot.signal_engine.strategies.scalp.range_scalp import RangeScalpStrategy
+from chartpilot.signal_engine.strategies.scalp.vwap_reversion import VwapReversionStrategy
+from chartpilot.signal_engine.strategies.swing.breakout import BreakoutStrategy
+from chartpilot.signal_engine.strategies.swing.macd_momentum import MacdMomentumStrategy
+from chartpilot.signal_engine.strategies.swing.pullback_fib import PullbackFibStrategy
+from chartpilot.signal_engine.strategies.swing.support_resistance import SupportResistanceReversalStrategy
 from chartpilot.signal_engine.strategies.swing.trend_following import TrendFollowingStrategy
 
 _STRATEGY_CLASSES: list[type[BaseStrategy]] = [
     TrendFollowingStrategy,
-    # Remaining swing strategies (4.2-4.5) and all scalp strategies (5.1-5.5)
-    # are Phase 2 scope per the roadmap.
+    PullbackFibStrategy,
+    BreakoutStrategy,
+    SupportResistanceReversalStrategy,
+    MacdMomentumStrategy,
+    EmaCrossoverStrategy,
+    BollingerReversionStrategy,
+    VwapReversionStrategy,
+    RangeScalpStrategy,
+    BreakoutMomentumScalpStrategy,
 ]
 
 _REGISTRY: dict[str, BaseStrategy] = {cls.id: cls() for cls in _STRATEGY_CLASSES}

@@ -23,10 +23,10 @@ class MainWindow(MSFluentWindow):
         super().__init__()
         self.setWindowTitle("ChartPilot")
         self.resize(1280, 800)
-        setTheme(Theme.DARK)
 
         self.config_store = ConfigStore(config_dir)
         prefs = self.config_store.load()
+        setTheme(Theme.DARK if prefs.theme == "dark" else Theme.LIGHT)
 
         cache_path = self.config_store.config_dir / "cache.sqlite3"
         self.candle_cache = CandleCache(cache_path)
@@ -38,7 +38,7 @@ class MainWindow(MSFluentWindow):
         )
 
         self.analysis_interface = AnalysisInterface(
-            self.exchange_client, prefs.symbol, prefs.timeframe, prefs.strategy, self
+            self.exchange_client, prefs.symbol, prefs.timeframe, prefs.mode, prefs.strategy, self
         )
         self.about_interface = AboutInterface(self)
 
@@ -75,9 +75,11 @@ class MainWindow(MSFluentWindow):
             self.analysis_interface.exchange_client = self.exchange_client
 
     def closeEvent(self, event) -> None:
+        self.analysis_interface.shutdown()
         prefs = self.config_store.load()
         prefs.symbol = self.analysis_interface.symbol_edit.text().strip().upper()
         prefs.timeframe = self.analysis_interface.timeframe_combo.currentText()
+        prefs.mode = self.analysis_interface.mode
         prefs.strategy = self.analysis_interface.selected_strategy_id
         self.config_store.save(prefs)
         self.candle_cache.close()

@@ -31,15 +31,35 @@
     scaleMargins: { top: 0.85, bottom: 0 },
   });
 
-  const overlayColors = { sma20: "#f5a623", sma50: "#3a86ff", sma200: "#a259ff" };
+  // Overlay set differs by mode (swing: SMA20/50/200; scalp: EMA9/21 +
+  // Bollinger Bands), so series are created/torn down dynamically to match
+  // whatever keys the current payload carries.
+  const overlayColorPalette = {
+    sma20: "#f5a623", sma50: "#3a86ff", sma200: "#a259ff",
+    ema9: "#f5a623", ema21: "#3a86ff",
+    bb_lower: "#5c6370", bb_mid: "#8a8f9c", bb_upper: "#5c6370",
+  };
   const overlaySeries = {};
-  for (const key of Object.keys(overlayColors)) {
-    overlaySeries[key] = chart.addLineSeries({
-      color: overlayColors[key],
-      lineWidth: 2,
-      priceLineVisible: false,
-      lastValueVisible: false,
-    });
+
+  function syncOverlays(overlays) {
+    const keys = Object.keys(overlays);
+    for (const existingKey of Object.keys(overlaySeries)) {
+      if (!keys.includes(existingKey)) {
+        chart.removeSeries(overlaySeries[existingKey]);
+        delete overlaySeries[existingKey];
+      }
+    }
+    for (const key of keys) {
+      if (!overlaySeries[key]) {
+        overlaySeries[key] = chart.addLineSeries({
+          color: overlayColorPalette[key] || "#888888",
+          lineWidth: 2,
+          priceLineVisible: false,
+          lastValueVisible: false,
+        });
+      }
+      overlaySeries[key].setData(overlays[key]);
+    }
   }
 
   let signalPriceLines = [];
@@ -82,15 +102,102 @@
     );
   }
 
+  let pivotPriceLines = [];
+
+  function clearPivotLines() {
+    for (const line of pivotPriceLines) candleSeries.removePriceLine(line);
+    pivotPriceLines = [];
+  }
+
+  function drawPivotLines(pivots) {
+    clearPivotLines();
+    if (!pivots) return;
+    const resistanceLevels = [["r1", pivots.r1], ["r2", pivots.r2], ["r3", pivots.r3]];
+    const supportLevels = [["s1", pivots.s1], ["s2", pivots.s2], ["s3", pivots.s3]];
+    pivotPriceLines.push(
+      candleSeries.createPriceLine({
+        price: pivots.pp, color: "#8a8f9c", lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dotted, axisLabelVisible: true, title: "PP",
+      })
+    );
+    for (const [label, price] of resistanceLevels) {
+      pivotPriceLines.push(candleSeries.createPriceLine({
+        price, color: "#EA3943", lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dotted, axisLabelVisible: true, title: label.toUpperCase(),
+      }));
+    }
+    for (const [label, price] of supportLevels) {
+      pivotPriceLines.push(candleSeries.createPriceLine({
+        price, color: "#16C784", lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dotted, axisLabelVisible: true, title: label.toUpperCase(),
+      }));
+    }
+  }
+
+  let fibPriceLines = [];
+
+  function clearFibLines() {
+    for (const line of fibPriceLines) candleSeries.removePriceLine(line);
+    fibPriceLines = [];
+  }
+
+  function drawFibLines(fib) {
+    clearFibLines();
+    if (!fib) return;
+    for (const [ratio, price] of Object.entries(fib.levels)) {
+      fibPriceLines.push(candleSeries.createPriceLine({
+        price, color: "#f5a623", lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.LargeDashed, axisLabelVisible: true,
+        title: `Fib ${Math.round(parseFloat(ratio) * 100)}%`,
+      }));
+    }
+  }
+
+  // Volume profile: a lightweight canvas sidebar (LWC has no native support
+  // for this) — one horizontal bar per price bucket, scaled to the busiest
+  // bucket, redrawn on render/resize. Non-interactive: it doesn't re-sync
+  // while panning/zooming, which is an acceptable v1 simplification.
+  const profileCanvas = document.createElement("canvas");
+  profileCanvas.id = "volume-profile";
+  profileCanvas.style.position = "absolute";
+  profileCanvas.style.top = "0";
+  profileCanvas.style.right = "0";
+  profileCanvas.style.pointerEvents = "none";
+  container.style.position = "relative";
+  container.appendChild(profileCanvas);
+  let currentVolumeProfile = null;
+
+  function drawVolumeProfile() {
+    const width = 90;
+    const height = container.clientHeight;
+    profileCanvas.width = width;
+    profileCanvas.height = height;
+    profileCanvas.style.width = width + "px";
+    profileCanvas.style.height = height + "px";
+    const ctx = profileCanvas.getContext("2d");
+    ctx.clearRect(0, 0, width, height);
+    if (!currentVolumeProfile || !currentVolumeProfile.length) return;
+    const maxVolume = Math.max(...currentVolumeProfile.map((b) => b.volume), 1);
+    ctx.fillStyle = "rgba(58, 134, 255, 0.35)";
+    for (const bin of currentVolumeProfile) {
+      const yTop = candleSeries.priceToCoordinate(bin.price_high);
+      const yBottom = candleSeries.priceToCoordinate(bin.price_low);
+      if (yTop === null || yBottom === null) continue;
+      const barWidth = (bin.volume / maxVolume) * width;
+      ctx.fillRect(width - barWidth, Math.min(yTop, yBottom), barWidth, Math.max(1, Math.abs(yBottom - yTop)));
+    }
+  }
+
   function renderChart(payload) {
     candleSeries.setData(payload.candles || []);
     volumeSeries.setData(payload.volume || []);
-    const overlays = payload.overlays || {};
-    for (const key of Object.keys(overlaySeries)) {
-      overlaySeries[key].setData(overlays[key] || []);
-    }
+    syncOverlays(payload.overlays || {});
     drawSignalLines(payload.signal || null);
+    drawPivotLines(payload.pivots || null);
+    drawFibLines(payload.fibonacci || null);
+    currentVolumeProfile = payload.volume_profile || null;
     chart.timeScale().fitContent();
+    drawVolumeProfile();
   }
 
   function updateLastCandle(payload) {
@@ -100,6 +207,7 @@
 
   function resize() {
     chart.resize(container.clientWidth, container.clientHeight);
+    drawVolumeProfile();
   }
   window.addEventListener("resize", resize);
 

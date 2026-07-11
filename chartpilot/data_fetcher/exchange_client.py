@@ -1,15 +1,16 @@
-"""ccxt wrapper for Binance spot market data.
-
-Phase 1 scope: REST klines only (`get_candles`), cache-first reads, and
-symbol validation against exchange metadata. WebSocket live updates
-(`subscribe_live`) land in Phase 2 per the roadmap.
+"""ccxt wrapper for Binance spot market data: REST klines (`get_candles`,
+cache-first) and WebSocket live updates (`subscribe_live`, ticker + kline).
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import threading
+from typing import Callable
 
 import ccxt
+import ccxt.pro as ccxtpro
 import pandas as pd
 
 from chartpilot.data_fetcher.cache import CandleCache
@@ -24,6 +25,10 @@ _DEFAULT_BUCKET_CAPACITY = 1000.0
 _DEFAULT_REFILL_PER_SECOND = 1000.0 / 60.0
 _KLINES_WEIGHT = 2.0
 _MAX_RETRIES = 5
+_STOP_POLL_INTERVAL = 0.2
+_WATCH_ERROR_BACKOFF = 1.0
+
+OnLiveUpdate = Callable[[str, dict], None]
 
 
 class SymbolNotFoundError(ValueError):
@@ -86,6 +91,62 @@ class ExchangeClient:
         df = pd.DataFrame(raw, columns=["open_time", "open", "high", "low", "close", "volume"])
         self.cache.upsert(cache_key, timeframe, df)
         return df.tail(limit).reset_index(drop=True)
+
+    def subscribe_live(self, symbol: str, timeframe: str, on_update: OnLiveUpdate, stop_event: threading.Event) -> None:
+        """Blocking call: opens a Binance WebSocket connection and streams
+        ticker (tier-1, sub-second) and kline (tier-2, candle-close) updates
+        via ccxt.pro's watch* methods until `stop_event` is set.
+
+        `on_update(kind, payload)` is invoked with kind "ticker" or "kline"
+        for each message, or "error" if a watch loop hits a transient
+        failure (the loop backs off and keeps retrying rather than dying).
+        Intended to be run on a background thread — see
+        `ui.analysis_view._LiveFeedThread`.
+        """
+        unified_symbol = self.validate_symbol(symbol)
+        asyncio.run(self._run_live_feed(unified_symbol, timeframe, on_update, stop_event))
+
+    async def _run_live_feed(self, unified_symbol: str, timeframe: str, on_update: OnLiveUpdate, stop_event: threading.Event) -> None:
+        pro_exchange = ccxtpro.binance({"enableRateLimit": True})
+        tasks = [
+            asyncio.create_task(self._watch_ticker_loop(pro_exchange, unified_symbol, on_update, stop_event)),
+            asyncio.create_task(self._watch_kline_loop(pro_exchange, unified_symbol, timeframe, on_update, stop_event)),
+        ]
+        try:
+            while not stop_event.is_set():
+                await asyncio.sleep(_STOP_POLL_INTERVAL)
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            await pro_exchange.close()
+
+    async def _watch_ticker_loop(self, pro_exchange, unified_symbol: str, on_update: OnLiveUpdate, stop_event: threading.Event) -> None:
+        while not stop_event.is_set():
+            try:
+                ticker = await pro_exchange.watch_ticker(unified_symbol)
+                on_update("ticker", {"last": ticker.get("last"), "percentage": ticker.get("percentage"),
+                                      "quote_volume": ticker.get("quoteVolume")})
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — keep the feed alive across transient WS errors
+                logger.warning("Ticker WS error for %s: %s", unified_symbol, exc)
+                on_update("error", {"message": str(exc)})
+                await asyncio.sleep(_WATCH_ERROR_BACKOFF)
+
+    async def _watch_kline_loop(self, pro_exchange, unified_symbol: str, timeframe: str, on_update: OnLiveUpdate, stop_event: threading.Event) -> None:
+        while not stop_event.is_set():
+            try:
+                ohlcv = await pro_exchange.watch_ohlcv(unified_symbol, timeframe)
+                if ohlcv:
+                    t, o, h, low, c, v = ohlcv[-1]
+                    on_update("kline", {"open_time": t, "open": o, "high": h, "low": low, "close": c, "volume": v})
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — keep the feed alive across transient WS errors
+                logger.warning("Kline WS error for %s %s: %s", unified_symbol, timeframe, exc)
+                on_update("error", {"message": str(exc)})
+                await asyncio.sleep(_WATCH_ERROR_BACKOFF)
 
     def _fetch_ohlcv_with_retry(self, unified_symbol: str, timeframe: str, limit: int) -> list:
         last_error: Exception | None = None

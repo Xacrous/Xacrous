@@ -34,6 +34,9 @@ class Signal:
     historical_win_rate: float | None = None
     generated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     disclaimer: str = DISCLAIMER
+    # Candle-count based staleness horizon for scalp signals (Section 5);
+    # None for swing signals, which don't expire this way.
+    expires_at: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -50,6 +53,7 @@ class Signal:
             "historical_win_rate": self.historical_win_rate,
             "rationale": self.rationale,
             "generated_at": self.generated_at,
+            "expires_at": self.expires_at,
             "disclaimer": self.disclaimer,
         }
 

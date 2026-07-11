@@ -19,6 +19,7 @@ from PyQt6.QtWebEngineWidgets import QWebEngineView
 
 from chartpilot.signal_engine.base_strategy import Signal
 from chartpilot.ta_engine.indicators import IndicatorSet
+from chartpilot.ta_engine.patterns import detect_fibonacci_retracement
 
 _WEB_DIR = Path(__file__).parent / "web"
 
@@ -74,15 +75,39 @@ class ChartWidget(QWebEngineView):
             }
             for t, v, o, c in zip(times_ms, df["volume"], df["open"], df["close"])
         ]
-        overlays = {
-            "sma20": _series_to_points(times_ms, indicators.sma20),
-            "sma50": _series_to_points(times_ms, indicators.sma50),
-            "sma200": _series_to_points(times_ms, indicators.sma200),
-        }
+        if indicators.mode == "swing":
+            overlays = {
+                "sma20": _series_to_points(times_ms, indicators.sma20),
+                "sma50": _series_to_points(times_ms, indicators.sma50),
+                "sma200": _series_to_points(times_ms, indicators.sma200),
+            }
+            pivots = indicators.pivots.as_dict() if indicators.pivots is not None else None
+            fib = detect_fibonacci_retracement(df, indicators.atr14)
+            fibonacci = {"direction": fib.direction, "levels": {str(k): v for k, v in fib.levels.items()}} if fib is not None else None
+            volume_profile = None
+        else:
+            overlays = {
+                "ema9": _series_to_points(times_ms, indicators.ema9),
+                "ema21": _series_to_points(times_ms, indicators.ema21),
+                "bb_lower": _series_to_points(times_ms, indicators.bb_lower),
+                "bb_mid": _series_to_points(times_ms, indicators.bb_mid),
+                "bb_upper": _series_to_points(times_ms, indicators.bb_upper),
+            }
+            pivots = None
+            fibonacci = None
+            volume_profile = (
+                [{"price_low": b.price_low, "price_high": b.price_high, "volume": b.volume} for b in indicators.volume_profile.bins]
+                if indicators.volume_profile is not None
+                else None
+            )
+
         payload = {
             "candles": candles,
             "volume": volume,
             "overlays": overlays,
+            "pivots": pivots,
+            "fibonacci": fibonacci,
+            "volume_profile": volume_profile,
             "signal": {
                 "direction": signal.direction,
                 "entry": signal.entry,
