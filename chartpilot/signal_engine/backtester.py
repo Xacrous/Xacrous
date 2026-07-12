@@ -91,6 +91,11 @@ class BacktestResult:
 
 
 def run_backtest(df: pd.DataFrame, mode: Mode, strategy: BaseStrategy, max_lookahead: int = _DEFAULT_MAX_LOOKAHEAD) -> BacktestResult:
+    """Replay every bar in `df` (from MIN_CANDLES[mode] onward), giving the
+    strategy the same trailing window size the live UI fetches
+    (CANDLE_LIMIT[mode]) at each step. Cost scales with len(df) — callers
+    that want a quick, bounded backtest should slice `df` down first rather
+    than pass a large frame and expect this to stay fast."""
     df = df.reset_index(drop=True)
     trailing_window = CANDLE_LIMIT[mode]
     min_candles = MIN_CANDLES[mode]

@@ -23,7 +23,9 @@ _MIN_SCALP_CANDLES = 50
 
 # The trailing-window size fetched/replayed per mode — shared by the live UI
 # and the backtester so a replay sees exactly what the live app would have.
-CANDLE_LIMIT: dict[Mode, int] = {"swing": 250, "scalp": 150}
+# 1000 is Binance's REST klines cap per call, so this is the most history a
+# single fetch can carry without pagination.
+CANDLE_LIMIT: dict[Mode, int] = {"swing": 1000, "scalp": 1000}
 MIN_CANDLES: dict[Mode, int] = {"swing": _MIN_SWING_CANDLES, "scalp": _MIN_SCALP_CANDLES}
 
 
