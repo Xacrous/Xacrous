@@ -17,8 +17,8 @@ import threading
 from datetime import datetime
 
 import pandas as pd
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
-from PyQt6.QtWidgets import QHBoxLayout, QSplitter, QVBoxLayout, QWidget
+from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
+from PyQt6.QtWidgets import QFrame, QHBoxLayout, QInputDialog, QScrollArea, QSplitter, QVBoxLayout, QWidget
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
@@ -61,14 +61,47 @@ class WatchlistPanel(QWidget):
     def __init__(self, symbols: list[str], parent=None) -> None:
         super().__init__(parent)
         self.setFixedWidth(90)
+        self._symbols: list[str] = []
+
+        self._list_container = QWidget(self)
+        self._list_layout = QVBoxLayout(self._list_container)
+        self._list_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self._list_layout.setContentsMargins(0, 0, 0, 0)
+        self._list_layout.setSpacing(2)
+
+        scroll_area = QScrollArea(self)
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll_area.setWidget(self._list_container)
+
+        self._add_button = TransparentPushButton("+ Add", self)
+        self._add_button.setToolTip("Add a symbol to the watchlist")
+        self._add_button.clicked.connect(self._prompt_add_symbol)
+
         layout = QVBoxLayout(self)
-        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(CaptionLabel("WATCHLIST", self))
+        layout.addWidget(scroll_area, 1)
+        layout.addWidget(self._add_button)
+
         for symbol in symbols:
-            button = TransparentPushButton(symbol.removesuffix("USDT"), self)
-            button.clicked.connect(lambda checked=False, s=symbol: self.symbol_selected.emit(s))
-            layout.addWidget(button)
-        layout.addStretch(1)
+            self.add_symbol(symbol)
+
+    def add_symbol(self, symbol: str) -> None:
+        symbol = symbol.strip().upper()
+        if not symbol or symbol in self._symbols:
+            return
+        self._symbols.append(symbol)
+        button = TransparentPushButton(symbol.removesuffix("USDT"), self)
+        button.setToolTip(symbol)
+        button.clicked.connect(lambda checked=False, s=symbol: self.symbol_selected.emit(s))
+        self._list_layout.addWidget(button)
+
+    def _prompt_add_symbol(self) -> None:
+        text, ok = QInputDialog.getText(self, "Add to watchlist", "Symbol (e.g. BTCUSDT):")
+        if ok and text.strip():
+            self.add_symbol(text)
 
 
 class _SignalWorker(QThread):
@@ -239,6 +272,7 @@ class AnalysisInterface(QWidget):
         default_mode: Mode,
         default_strategy_id: str,
         signal_log: SignalLog,
+        refresh_interval_seconds: int = 30,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -256,18 +290,30 @@ class AnalysisInterface(QWidget):
         self.symbol_edit.setText(default_symbol)
         self.symbol_edit.setFixedWidth(120)
 
+        # Compact two-item pill: pinned so it can never stretch to fill
+        # whatever width the top bar's layout happens to give it.
         self.mode_selector = SegmentedWidget(self)
         self.mode_selector.addItem(routeKey="swing", text="Swing", onClick=lambda: self._on_mode_changed("swing"))
         self.mode_selector.addItem(routeKey="scalp", text="Scalp", onClick=lambda: self._on_mode_changed("scalp"))
         self.mode_selector.setCurrentItem(self._mode)
+        self.mode_selector.setFixedHeight(33)
+        self.mode_selector.setMaximumWidth(140)
 
         self.timeframe_combo = ComboBox(self)
         self.strategy_combo = ComboBox(self)
         self._strategy_ids: list[str] = []
         self._populate_mode_controls(self._mode, preferred_timeframe=default_timeframe, preferred_strategy_id=default_strategy_id)
+        self.timeframe_combo.currentIndexChanged.connect(self._on_timeframe_changed)
+        self.strategy_combo.currentIndexChanged.connect(self._on_strategy_changed)
 
         self.refresh_button = PrimaryPushButton("⟳ Refresh", self)
         self.refresh_button.clicked.connect(self.refresh)
+
+        # Fallback periodic refresh alongside the WS live feed — honors the
+        # "Refresh interval" setting (previously stored but never acted on).
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.timeout.connect(self.refresh)
+        self.set_refresh_interval_seconds(refresh_interval_seconds)
 
         self.status_label = CaptionLabel("", self)
 
@@ -340,6 +386,23 @@ class AnalysisInterface(QWidget):
         self._no_more_history = False
         self._mode = mode
         self._populate_mode_controls(mode)
+        self.refresh()
+
+    def _on_timeframe_changed(self, _index: int) -> None:
+        # Timeframe determines candle granularity, so this needs a fresh fetch.
+        self.refresh()
+
+    def _on_strategy_changed(self, _index: int) -> None:
+        # No new candles needed — just re-evaluate the already-loaded window
+        # against the newly selected strategy and update the chart/panel.
+        if self._current_df is None:
+            return
+        self._recompute_and_render(self._current_df)
+
+    def set_refresh_interval_seconds(self, seconds: int) -> None:
+        """Periodic fallback refresh alongside the WS live feed, driven by
+        the user's Settings > Refresh interval preference."""
+        self._refresh_timer.start(max(1, int(seconds)) * 1000)
 
     def refresh(self) -> None:
         if self._worker is not None and self._worker.isRunning():
@@ -395,6 +458,38 @@ class AnalysisInterface(QWidget):
         pct_str = f" {pct:+.2f}% (24h)" if pct is not None else ""
         now = datetime.now().strftime("%H:%M:%S")
         self.status_label.setText(f"{last:g}{pct_str} · ● Live · updated {now}")
+        self._update_live_candle_price(float(last))
+
+    def _update_live_candle_price(self, last_price: float) -> None:
+        """Tier-1 sub-second update: move the still-forming last candle's
+        close/high/low with the live ticker price, without touching
+        indicators or re-evaluating the strategy (that's tier-2, on candle
+        close) — otherwise the chart's current candle sits frozen between
+        candle closes even though the price is live underneath it."""
+        if self._current_df is None or self._current_df.empty:
+            return
+        df = self._current_df
+        idx = df.index[-1]
+        df.at[idx, "close"] = last_price
+        df.at[idx, "high"] = max(float(df.at[idx, "high"]), last_price)
+        df.at[idx, "low"] = min(float(df.at[idx, "low"]), last_price)
+        self.chart_widget.update_last_candle(df.loc[idx])
+
+    def _recompute_and_render(self, df: pd.DataFrame) -> None:
+        try:
+            indicators = compute(df, mode=self._mode)
+        except ValueError:
+            return  # not enough candles in the trailing window yet
+        strategy = get_strategy(self.selected_strategy_id)
+        signal = strategy.evaluate(df, indicators)
+        resolve_pending_for_window(df, self.signal_log)
+        if signal is not None:
+            enrich_signal(df, self._mode, strategy, signal, self.signal_log)
+        self.chart_widget.render(df, indicators, signal)
+        if signal is not None:
+            self.signal_panel.show_signal(signal)
+        else:
+            self.signal_panel.show_empty_state()
 
     def _on_kline_closed(self, payload: dict) -> None:
         if self._current_df is None:
@@ -419,21 +514,7 @@ class AnalysisInterface(QWidget):
         df.attrs["symbol"] = symbol
         df.attrs["timeframe"] = timeframe
         self._current_df = df
-
-        try:
-            indicators = compute(df, mode=self._mode)
-        except ValueError:
-            return  # not enough candles in the trailing window yet
-        strategy = get_strategy(self.selected_strategy_id)
-        signal = strategy.evaluate(df, indicators)
-        resolve_pending_for_window(df, self.signal_log)
-        if signal is not None:
-            enrich_signal(df, self._mode, strategy, signal, self.signal_log)
-        self.chart_widget.render(df, indicators, signal)
-        if signal is not None:
-            self.signal_panel.show_signal(signal)
-        else:
-            self.signal_panel.show_empty_state()
+        self._recompute_and_render(df)
 
     def _on_more_history_requested(self, oldest_time_sec: float) -> None:
         """The chart panned near its left (oldest-loaded) edge — fetch one
@@ -495,4 +576,5 @@ class AnalysisInterface(QWidget):
         self.status_label.setText("⚠ Live feed reconnecting…")
 
     def shutdown(self) -> None:
+        self._refresh_timer.stop()
         self._stop_live_feed()

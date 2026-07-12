@@ -62,7 +62,10 @@ class ExchangeClient:
     ) -> None:
         self.cache = cache
         self.cache_ttl_seconds = cache_ttl_seconds
-        config: dict = {"enableRateLimit": True}
+        # Explicit spot pin: ChartPilot is spot-only, execution-free analysis
+        # (never futures/margin) — pin ccxt's defaultType rather than relying
+        # on its own default, so a future ccxt upgrade can't silently change it.
+        config: dict = {"enableRateLimit": True, "options": {"defaultType": "spot"}}
         if api_key and api_secret:
             config["apiKey"] = api_key
             config["secret"] = api_secret
@@ -151,7 +154,7 @@ class ExchangeClient:
         asyncio.run(self._run_live_feed(unified_symbol, timeframe, on_update, stop_event))
 
     async def _run_live_feed(self, unified_symbol: str, timeframe: str, on_update: OnLiveUpdate, stop_event: threading.Event) -> None:
-        pro_exchange = ccxtpro.binance({"enableRateLimit": True})
+        pro_exchange = ccxtpro.binance({"enableRateLimit": True, "options": {"defaultType": "spot"}})
         tasks = [
             asyncio.create_task(self._watch_ticker_loop(pro_exchange, unified_symbol, on_update, stop_event)),
             asyncio.create_task(self._watch_kline_loop(pro_exchange, unified_symbol, timeframe, on_update, stop_event)),

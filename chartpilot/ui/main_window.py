@@ -37,7 +37,8 @@ class MainWindow(MSFluentWindow):
         )
 
         self.analysis_interface = AnalysisInterface(
-            self.exchange_client, prefs.symbol, prefs.timeframe, prefs.mode, prefs.strategy, self.signal_log, self
+            self.exchange_client, prefs.symbol, prefs.timeframe, prefs.mode, prefs.strategy, self.signal_log,
+            refresh_interval_seconds=prefs.refresh_interval_seconds, parent=self,
         )
         self.backtest_interface = BacktestInterface(self.exchange_client, self.signal_log, self)
         self.about_interface = AboutInterface(self)
@@ -75,6 +76,8 @@ class MainWindow(MSFluentWindow):
             )
             self.analysis_interface.exchange_client = self.exchange_client
             self.backtest_interface.exchange_client = self.exchange_client
+            prefs = self.config_store.load()
+            self.analysis_interface.set_refresh_interval_seconds(prefs.refresh_interval_seconds)
 
     def closeEvent(self, event) -> None:
         self.analysis_interface.shutdown()
