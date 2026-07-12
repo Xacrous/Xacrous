@@ -38,6 +38,7 @@
     sma20: "#f5a623", sma50: "#3a86ff", sma200: "#a259ff",
     ema9: "#f5a623", ema21: "#3a86ff",
     bb_lower: "#5c6370", bb_mid: "#8a8f9c", bb_upper: "#5c6370",
+    vwap: "#e91e8c",
   };
   const overlaySeries = {};
 

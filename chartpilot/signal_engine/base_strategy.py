@@ -13,7 +13,7 @@ from chartpilot import DISCLAIMER
 from chartpilot.ta_engine.indicators import IndicatorSet
 
 Direction = Literal["long", "short"]
-Mode = Literal["swing", "scalp"]
+Mode = Literal["swing", "scalp", "trade"]
 
 
 @dataclass

@@ -60,6 +60,19 @@ def test_compute_scalp_vwap_tracks_price_in_uptrend():
     assert ind.latest(ind.vwap) < float(close.iloc[-1])
 
 
+def test_compute_requires_at_least_50_candles_for_trade():
+    with pytest.raises(ValueError):
+        compute(_flat_df(49), mode="trade")
+
+
+def test_compute_trade_returns_scalp_indicator_set_labeled_trade():
+    df = _flat_df(60)
+    ind = compute(df, mode="trade")
+    assert ind.mode == "trade"
+    assert ind.vwap is not None
+    assert len(ind.atr14) == len(df)
+
+
 def test_compute_swing_returns_expected_series():
     df = _flat_df(210)
     ind = compute(df, mode="swing")

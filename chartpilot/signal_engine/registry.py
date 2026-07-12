@@ -18,6 +18,7 @@ from chartpilot.signal_engine.strategies.swing.macd_momentum import MacdMomentum
 from chartpilot.signal_engine.strategies.swing.pullback_fib import PullbackFibStrategy
 from chartpilot.signal_engine.strategies.swing.support_resistance import SupportResistanceReversalStrategy
 from chartpilot.signal_engine.strategies.swing.trend_following import TrendFollowingStrategy
+from chartpilot.signal_engine.strategies.trade.vwap_crossover import VwapCrossoverStrategy
 
 _STRATEGY_CLASSES: list[type[BaseStrategy]] = [
     TrendFollowingStrategy,
@@ -30,6 +31,7 @@ _STRATEGY_CLASSES: list[type[BaseStrategy]] = [
     VwapReversionStrategy,
     RangeScalpStrategy,
     BreakoutMomentumScalpStrategy,
+    VwapCrossoverStrategy,
 ]
 
 _REGISTRY: dict[str, BaseStrategy] = {cls.id: cls() for cls in _STRATEGY_CLASSES}

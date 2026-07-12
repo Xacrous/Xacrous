@@ -104,6 +104,7 @@ class ChartWidget(QWebEngineView):
                 "bb_lower": _series_to_points(times_ms, indicators.bb_lower),
                 "bb_mid": _series_to_points(times_ms, indicators.bb_mid),
                 "bb_upper": _series_to_points(times_ms, indicators.bb_upper),
+                "vwap": _series_to_points(times_ms, indicators.vwap),
             }
             pivots = None
             fibonacci = None

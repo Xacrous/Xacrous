@@ -44,6 +44,7 @@ logger = logging.getLogger(__name__)
 TIMEFRAMES: dict[Mode, list[str]] = {
     "swing": ["1h", "4h", "1d"],
     "scalp": ["1m", "5m", "15m"],
+    "trade": ["1m", "5m", "15m"],
 }
 _LIVE_STOP_TIMEOUT_MS = 5000
 DEFAULT_WATCHLIST = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
@@ -273,10 +274,12 @@ class AnalysisInterface(QWidget):
         default_strategy_id: str,
         signal_log: SignalLog,
         refresh_interval_seconds: int = 30,
+        fixed_mode: Mode | None = None,
+        object_name: str = "analysisInterface",
         parent=None,
     ) -> None:
         super().__init__(parent)
-        self.setObjectName("analysisInterface")
+        self.setObjectName(object_name)
         self.exchange_client = exchange_client
         self.signal_log = signal_log
         self._worker: _SignalWorker | None = None
@@ -284,20 +287,29 @@ class AnalysisInterface(QWidget):
         self._history_worker: _HistoryWorker | None = None
         self._current_df: pd.DataFrame | None = None
         self._no_more_history = False
-        self._mode: Mode = default_mode if default_mode in TIMEFRAMES else "swing"
+        self._fixed_mode = fixed_mode
+        if fixed_mode is not None:
+            self._mode: Mode = fixed_mode
+        else:
+            self._mode = default_mode if default_mode in TIMEFRAMES else "swing"
 
         self.symbol_edit = LineEdit(self)
         self.symbol_edit.setText(default_symbol)
         self.symbol_edit.setFixedWidth(120)
 
         # Compact two-item pill: pinned so it can never stretch to fill
-        # whatever width the top bar's layout happens to give it.
-        self.mode_selector = SegmentedWidget(self)
-        self.mode_selector.addItem(routeKey="swing", text="Swing", onClick=lambda: self._on_mode_changed("swing"))
-        self.mode_selector.addItem(routeKey="scalp", text="Scalp", onClick=lambda: self._on_mode_changed("scalp"))
-        self.mode_selector.setCurrentItem(self._mode)
-        self.mode_selector.setFixedHeight(33)
-        self.mode_selector.setMaximumWidth(140)
+        # whatever width the top bar's layout happens to give it. Omitted
+        # entirely when the mode is fixed (e.g. the single-mode Trade tab)
+        # since there's nothing to toggle between.
+        if fixed_mode is None:
+            self.mode_selector = SegmentedWidget(self)
+            self.mode_selector.addItem(routeKey="swing", text="Swing", onClick=lambda: self._on_mode_changed("swing"))
+            self.mode_selector.addItem(routeKey="scalp", text="Scalp", onClick=lambda: self._on_mode_changed("scalp"))
+            self.mode_selector.setCurrentItem(self._mode)
+            self.mode_selector.setFixedHeight(33)
+            self.mode_selector.setMaximumWidth(140)
+        else:
+            self.mode_selector = None
 
         self.timeframe_combo = ComboBox(self)
         self.strategy_combo = ComboBox(self)
@@ -319,7 +331,8 @@ class AnalysisInterface(QWidget):
 
         top_bar = QHBoxLayout()
         top_bar.addWidget(self.symbol_edit)
-        top_bar.addWidget(self.mode_selector)
+        if self.mode_selector is not None:
+            top_bar.addWidget(self.mode_selector)
         top_bar.addWidget(self.timeframe_combo)
         top_bar.addWidget(self.strategy_combo)
         top_bar.addWidget(self.refresh_button)

@@ -16,17 +16,20 @@ import pandas_ta_classic as ta  # noqa: F401 — registers the df.ta accessor us
 
 from chartpilot.ta_engine.levels import PivotLevels, compute_pivot_points
 
-Mode = Literal["swing", "scalp"]
+Mode = Literal["swing", "scalp", "trade"]
 
 _MIN_SWING_CANDLES = 200
 _MIN_SCALP_CANDLES = 50
+# "trade" (VWAP crossover, spot) needs the same indicators as scalp
+# (vwap, atr14) and no daily-anchor minimum beyond that.
+_MIN_TRADE_CANDLES = 50
 
 # The trailing-window size fetched/replayed per mode — shared by the live UI
 # and the backtester so a replay sees exactly what the live app would have.
 # 1000 is Binance's REST klines cap per call, so this is the most history a
 # single fetch can carry without pagination.
-CANDLE_LIMIT: dict[Mode, int] = {"swing": 1000, "scalp": 1000}
-MIN_CANDLES: dict[Mode, int] = {"swing": _MIN_SWING_CANDLES, "scalp": _MIN_SCALP_CANDLES}
+CANDLE_LIMIT: dict[Mode, int] = {"swing": 1000, "scalp": 1000, "trade": 1000}
+MIN_CANDLES: dict[Mode, int] = {"swing": _MIN_SWING_CANDLES, "scalp": _MIN_SCALP_CANDLES, "trade": _MIN_TRADE_CANDLES}
 
 
 @dataclass(frozen=True)
@@ -131,7 +134,7 @@ def _compute_swing(df: pd.DataFrame) -> IndicatorSet:
     )
 
 
-def _compute_scalp(df: pd.DataFrame) -> IndicatorSet:
+def _compute_scalp(df: pd.DataFrame, mode: Mode = "scalp") -> IndicatorSet:
     rsi14 = df.ta.rsi(length=14)
     atr14 = df.ta.atr(length=14)
     volume_sma20 = df["volume"].rolling(window=20).mean()
@@ -152,7 +155,7 @@ def _compute_scalp(df: pd.DataFrame) -> IndicatorSet:
     volume_profile = compute_volume_profile(df, lookback=min(100, len(df)), bins=20)
 
     return IndicatorSet(
-        mode="scalp",
+        mode=mode,
         rsi14=rsi14,
         atr14=atr14,
         volume_sma20=volume_sma20,
@@ -183,4 +186,12 @@ def compute(df: pd.DataFrame, mode: Mode = "swing") -> IndicatorSet:
                 f"need at least {_MIN_SCALP_CANDLES} candles for scalp-mode indicators, got {len(df)}"
             )
         return _compute_scalp(df)
+    if mode == "trade":
+        # VWAP crossover only needs vwap + atr14, both already part of the
+        # scalp indicator set — no separate computation path needed.
+        if len(df) < _MIN_TRADE_CANDLES:
+            raise ValueError(
+                f"need at least {_MIN_TRADE_CANDLES} candles for trade-mode indicators, got {len(df)}"
+            )
+        return _compute_scalp(df, mode="trade")
     raise ValueError(f"unknown mode {mode!r}")

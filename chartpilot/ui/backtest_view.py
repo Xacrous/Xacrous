@@ -79,7 +79,10 @@ class BacktestInterface(QWidget):
         self.mode_selector = SegmentedWidget(self)
         self.mode_selector.addItem(routeKey="swing", text="Swing", onClick=lambda: self._on_mode_changed("swing"))
         self.mode_selector.addItem(routeKey="scalp", text="Scalp", onClick=lambda: self._on_mode_changed("scalp"))
+        self.mode_selector.addItem(routeKey="trade", text="Trade", onClick=lambda: self._on_mode_changed("trade"))
         self.mode_selector.setCurrentItem("swing")
+        self.mode_selector.setFixedHeight(33)
+        self.mode_selector.setMaximumWidth(210)
 
         self.timeframe_combo = ComboBox(self)
         self.strategy_combo = ComboBox(self)
