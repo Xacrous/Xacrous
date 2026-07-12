@@ -48,6 +48,12 @@ TIMEFRAMES: dict[Mode, list[str]] = {
 _LIVE_STOP_TIMEOUT_MS = 5000
 DEFAULT_WATCHLIST = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
 
+# Safety cap on how far back infinite scroll-back can grow the in-memory
+# chart frame — well beyond CANDLE_LIMIT (the single-fetch size), but bounded
+# so an aggressive scroll-back session can't grow memory/indicator-compute
+# cost unbounded.
+MAX_CHART_CANDLES = 20000
+
 
 class WatchlistPanel(QWidget):
     symbol_selected = pyqtSignal(str)
@@ -98,6 +104,26 @@ class _SignalWorker(QThread):
         except Exception as exc:  # noqa: BLE001 — surface any fetch/compute failure to the UI
             logger.exception("Signal pipeline failed for %s %s", self.symbol, self.timeframe)
             self.failed.emit(f"Couldn't load {self.symbol} {self.timeframe}: {exc}")
+
+
+class _HistoryWorker(QThread):
+    succeeded = pyqtSignal(object)  # older candles df (may be empty)
+    failed = pyqtSignal(str)
+
+    def __init__(self, exchange_client: ExchangeClient, symbol: str, timeframe: str, before_ms: int) -> None:
+        super().__init__()
+        self.exchange_client = exchange_client
+        self.symbol = symbol
+        self.timeframe = timeframe
+        self.before_ms = before_ms
+
+    def run(self) -> None:
+        try:
+            df = self.exchange_client.get_candles_before(self.symbol, self.timeframe, self.before_ms)
+            self.succeeded.emit(df)
+        except Exception as exc:  # noqa: BLE001 — surface any pagination failure to the UI
+            logger.exception("History pagination failed for %s %s", self.symbol, self.timeframe)
+            self.failed.emit(str(exc))
 
 
 class _LiveFeedThread(QThread):
@@ -221,7 +247,9 @@ class AnalysisInterface(QWidget):
         self.signal_log = signal_log
         self._worker: _SignalWorker | None = None
         self._live_thread: _LiveFeedThread | None = None
+        self._history_worker: _HistoryWorker | None = None
         self._current_df: pd.DataFrame | None = None
+        self._no_more_history = False
         self._mode: Mode = default_mode if default_mode in TIMEFRAMES else "swing"
 
         self.symbol_edit = LineEdit(self)
@@ -253,6 +281,7 @@ class AnalysisInterface(QWidget):
         top_bar.addWidget(self.status_label)
 
         self.chart_widget = ChartWidget(self)
+        self.chart_widget.bridge.more_history_requested.connect(self._on_more_history_requested)
         self.signal_panel = SignalPanel(self)
 
         splitter = QSplitter(self)
@@ -308,6 +337,7 @@ class AnalysisInterface(QWidget):
             return
         self._stop_live_feed()
         self._current_df = None
+        self._no_more_history = False
         self._mode = mode
         self._populate_mode_controls(mode)
 
@@ -330,6 +360,7 @@ class AnalysisInterface(QWidget):
 
     def _on_success(self, df, indicators: IndicatorSet, signal: Signal | None) -> None:
         self._current_df = df
+        self._no_more_history = False
         self.chart_widget.render(df, indicators, signal)
         if signal is not None:
             self.signal_panel.show_signal(signal)
@@ -377,9 +408,12 @@ class AnalysisInterface(QWidget):
             df.iloc[-1, df.columns.get_indexer(list(new_row.keys()))] = list(new_row.values())
         else:
             df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-            limit = CANDLE_LIMIT[self._mode]
-            if len(df) > limit:
-                df = df.iloc[-limit:].reset_index(drop=True)
+            # Cap at MAX_CHART_CANDLES rather than CANDLE_LIMIT here: the
+            # user may have paginated in far more history via scroll-back
+            # than a single fetch carries, and a live candle close must not
+            # silently discard it.
+            if len(df) > MAX_CHART_CANDLES:
+                df = df.iloc[-MAX_CHART_CANDLES:].reset_index(drop=True)
         symbol = self.symbol_edit.text().strip().upper()
         timeframe = self.timeframe_combo.currentText()
         df.attrs["symbol"] = symbol
@@ -400,6 +434,61 @@ class AnalysisInterface(QWidget):
             self.signal_panel.show_signal(signal)
         else:
             self.signal_panel.show_empty_state()
+
+    def _on_more_history_requested(self, oldest_time_sec: float) -> None:
+        """The chart panned near its left (oldest-loaded) edge — fetch one
+        more page of older candles in the background and prepend it."""
+        if self._current_df is None or self._no_more_history:
+            return
+        if self._history_worker is not None and self._history_worker.isRunning():
+            return
+        symbol = str(self._current_df.attrs.get("symbol", ""))
+        timeframe = str(self._current_df.attrs.get("timeframe", ""))
+        before_ms = int(oldest_time_sec * 1000)
+
+        self._history_worker = _HistoryWorker(self.exchange_client, symbol, timeframe, before_ms)
+        self._history_worker.succeeded.connect(self._on_more_history_loaded)
+        self._history_worker.failed.connect(self._on_more_history_failed)
+        self._history_worker.start()
+
+    def _on_more_history_loaded(self, older_df: pd.DataFrame) -> None:
+        if self._current_df is None:
+            return
+        if older_df is None or older_df.empty:
+            self._no_more_history = True
+            self.chart_widget.mark_no_more_history()
+            return
+
+        symbol = str(self._current_df.attrs.get("symbol", ""))
+        timeframe = str(self._current_df.attrs.get("timeframe", ""))
+        merged = pd.concat([older_df, self._current_df], ignore_index=True)
+        merged = merged.drop_duplicates(subset="open_time").sort_values("open_time").reset_index(drop=True)
+
+        no_more = False
+        if len(merged) > MAX_CHART_CANDLES:
+            merged = merged.iloc[-MAX_CHART_CANDLES:].reset_index(drop=True)
+            no_more = True  # hit the safety cap — stop paginating further back
+        merged.attrs["symbol"] = symbol
+        merged.attrs["timeframe"] = timeframe
+
+        try:
+            indicators = compute(merged, mode=self._mode)
+        except ValueError:
+            # Shouldn't happen since we only ever add candles, but stay
+            # defensive rather than crash the pagination path.
+            self.chart_widget.reset_loading_more()
+            return
+
+        self._current_df = merged
+        self._no_more_history = no_more
+        # Deliberately not re-running strategy.evaluate() here: the current
+        # signal describes the latest candle and must not change just
+        # because older history loaded further back on the chart.
+        self.chart_widget.prepend_history(merged, indicators, no_more_history=no_more)
+
+    def _on_more_history_failed(self, message: str) -> None:
+        logger.warning("History pagination failed: %s", message)
+        self.chart_widget.reset_loading_more()
 
     def _on_live_feed_error(self, message: str) -> None:
         logger.warning("Live feed error: %s", message)

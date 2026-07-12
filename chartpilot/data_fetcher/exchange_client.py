@@ -28,6 +28,23 @@ _MAX_RETRIES = 5
 _STOP_POLL_INTERVAL = 0.2
 _WATCH_ERROR_BACKOFF = 1.0
 
+# Binance's REST klines endpoint caps a single call at 1000 candles; older
+# history needs pagination via `since`, walking backward one call at a time.
+KLINES_PAGE_LIMIT = 1000
+
+TIMEFRAME_SECONDS = {
+    "1m": 60, "5m": 300, "15m": 900,
+    "1h": 3600, "4h": 14400, "1d": 86400,
+}
+
+
+def timeframe_to_seconds(timeframe: str) -> int:
+    try:
+        return TIMEFRAME_SECONDS[timeframe]
+    except KeyError as exc:
+        raise ValueError(f"unknown timeframe {timeframe!r}") from exc
+
+
 OnLiveUpdate = Callable[[str, dict], None]
 
 
@@ -92,6 +109,33 @@ class ExchangeClient:
         self.cache.upsert(cache_key, timeframe, df)
         return df.tail(limit).reset_index(drop=True)
 
+    def get_candles_before(self, symbol: str, timeframe: str, before_open_time_ms: int, limit: int = KLINES_PAGE_LIMIT) -> pd.DataFrame:
+        """Return up to `limit` candles strictly older than
+        `before_open_time_ms`, cache-first, oldest to newest — one page of
+        the infinite scroll-back the chart uses to walk further into
+        history than a single 1000-candle fetch reaches.
+
+        Unlike `get_candles`, there's no freshness TTL here: a candle that
+        already closed before `before_open_time_ms` never changes, so once
+        it's cached it's cached for good.
+        """
+        unified_symbol = self.validate_symbol(symbol)
+        cache_key = unified_symbol.replace("/", "")
+
+        cached = self.cache.get_before(cache_key, timeframe, before_open_time_ms, limit)
+        if cached is not None and len(cached) >= limit:
+            return cached
+
+        interval_ms = timeframe_to_seconds(timeframe) * 1000
+        since = before_open_time_ms - limit * interval_ms
+        raw = self._fetch_ohlcv_with_retry(unified_symbol, timeframe, limit, since=since)
+        df = pd.DataFrame(raw, columns=["open_time", "open", "high", "low", "close", "volume"])
+        if df.empty:
+            return df
+        self.cache.upsert(cache_key, timeframe, df)
+        df = df[df["open_time"] < before_open_time_ms].reset_index(drop=True)
+        return df.tail(limit).reset_index(drop=True)
+
     def subscribe_live(self, symbol: str, timeframe: str, on_update: OnLiveUpdate, stop_event: threading.Event) -> None:
         """Blocking call: opens a Binance WebSocket connection and streams
         ticker (tier-1, sub-second) and kline (tier-2, candle-close) updates
@@ -148,12 +192,12 @@ class ExchangeClient:
                 on_update("error", {"message": str(exc)})
                 await asyncio.sleep(_WATCH_ERROR_BACKOFF)
 
-    def _fetch_ohlcv_with_retry(self, unified_symbol: str, timeframe: str, limit: int) -> list:
+    def _fetch_ohlcv_with_retry(self, unified_symbol: str, timeframe: str, limit: int, since: int | None = None) -> list:
         last_error: Exception | None = None
         for attempt in range(_MAX_RETRIES):
             self.rate_limiter.acquire(weight=_KLINES_WEIGHT)
             try:
-                return self.exchange.fetch_ohlcv(unified_symbol, timeframe=timeframe, limit=limit)
+                return self.exchange.fetch_ohlcv(unified_symbol, timeframe=timeframe, limit=limit, since=since)
             except ccxt.RateLimitExceeded as exc:
                 delay = self.rate_limiter.on_rate_limited(attempt)
                 logger.warning("Rate limited fetching %s %s, backing off %.1fs", unified_symbol, timeframe, delay)

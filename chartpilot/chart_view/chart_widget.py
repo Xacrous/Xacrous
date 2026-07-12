@@ -27,6 +27,14 @@ _WEB_DIR = Path(__file__).parent / "web"
 class ChartBridge(QObject):
     render_signal = pyqtSignal(str)
     update_last_candle_signal = pyqtSignal(str)
+    prepend_history_signal = pyqtSignal(str)
+    no_more_history_signal = pyqtSignal()
+    history_request_failed_signal = pyqtSignal()
+
+    # Emitted (oldest loaded candle's open_time, in seconds) when the chart
+    # pans near the left edge of what's loaded and JS wants an older page —
+    # the UI layer connects to this to kick off a background fetch.
+    more_history_requested = pyqtSignal(float)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -35,6 +43,10 @@ class ChartBridge(QObject):
     @pyqtSlot()
     def ready(self) -> None:
         self.is_ready = True
+
+    @pyqtSlot(float)
+    def request_more_history(self, oldest_time_sec: float) -> None:
+        self.more_history_requested.emit(oldest_time_sec)
 
 
 def _series_to_points(times_ms: pd.Series, values: pd.Series) -> list[dict]:
@@ -55,7 +67,7 @@ class ChartWidget(QWebEngineView):
         self.page().setWebChannel(self.channel)
         self.load(QUrl.fromLocalFile(str(_WEB_DIR / "chart.html")))
 
-    def render(self, df: pd.DataFrame, indicators: IndicatorSet, signal: Signal | None) -> None:
+    def _build_payload(self, df: pd.DataFrame, indicators: IndicatorSet) -> dict:
         times_ms = df["open_time"]
         candles = [
             {
@@ -101,23 +113,43 @@ class ChartWidget(QWebEngineView):
                 else None
             )
 
-        payload = {
+        return {
             "candles": candles,
             "volume": volume,
             "overlays": overlays,
             "pivots": pivots,
             "fibonacci": fibonacci,
             "volume_profile": volume_profile,
-            "signal": {
+        }
+
+    def render(self, df: pd.DataFrame, indicators: IndicatorSet, signal: Signal | None) -> None:
+        payload = self._build_payload(df, indicators)
+        payload["signal"] = (
+            {
                 "direction": signal.direction,
                 "entry": signal.entry,
                 "take_profit": signal.take_profit,
                 "stop_loss": signal.stop_loss,
             }
             if signal is not None
-            else None,
-        }
+            else None
+        )
         self.bridge.render_signal.emit(json.dumps(payload))
+
+    def prepend_history(self, df: pd.DataFrame, indicators: IndicatorSet, no_more_history: bool = False) -> None:
+        """Push a merged (older + already-loaded) candle set after a
+        scroll-back pagination fetch. Deliberately doesn't touch the signal
+        overlay — the current signal is about the latest candle and must
+        not change just because older history loaded."""
+        payload = self._build_payload(df, indicators)
+        payload["no_more_history"] = no_more_history
+        self.bridge.prepend_history_signal.emit(json.dumps(payload))
+
+    def mark_no_more_history(self) -> None:
+        self.bridge.no_more_history_signal.emit()
+
+    def reset_loading_more(self) -> None:
+        self.bridge.history_request_failed_signal.emit()
 
     def update_last_candle(self, candle_row: pd.Series) -> None:
         payload = {

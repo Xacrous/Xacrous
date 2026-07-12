@@ -188,8 +188,17 @@
     }
   }
 
+  // Infinite scroll-back state: how many candles/how far back we've loaded,
+  // and guards against firing overlapping/repeat history requests while one
+  // is already in flight or the pagination has run out of older data.
+  let currentCandleCount = 0;
+  let earliestCandleTime = null;
+  let isLoadingMore = false;
+  let noMoreHistory = false;
+
   function renderChart(payload) {
-    candleSeries.setData(payload.candles || []);
+    const candles = payload.candles || [];
+    candleSeries.setData(candles);
     volumeSeries.setData(payload.volume || []);
     syncOverlays(payload.overlays || {});
     drawSignalLines(payload.signal || null);
@@ -198,12 +207,68 @@
     currentVolumeProfile = payload.volume_profile || null;
     chart.timeScale().fitContent();
     drawVolumeProfile();
+
+    currentCandleCount = candles.length;
+    earliestCandleTime = candles.length ? candles[0].time : null;
+    isLoadingMore = false;
+    noMoreHistory = false;
   }
 
   function updateLastCandle(payload) {
     if (payload.candle) candleSeries.update(payload.candle);
     if (payload.volume) volumeSeries.update(payload.volume);
   }
+
+  // Prepend older history fetched via pagination. Unlike renderChart, this
+  // must NOT call fitContent() — that would jarringly recenter the view.
+  // Instead it captures the visible logical range beforehand and restores
+  // it shifted by however many bars landed in front of what was visible.
+  function prependHistory(payload) {
+    const newCandles = payload.candles || [];
+    const priorRange = chart.timeScale().getVisibleLogicalRange();
+    const delta = newCandles.length - currentCandleCount;
+
+    candleSeries.setData(newCandles);
+    volumeSeries.setData(payload.volume || []);
+    syncOverlays(payload.overlays || {});
+    drawPivotLines(payload.pivots || null);
+    drawFibLines(payload.fibonacci || null);
+    currentVolumeProfile = payload.volume_profile || null;
+    drawVolumeProfile();
+
+    currentCandleCount = newCandles.length;
+    earliestCandleTime = newCandles.length ? newCandles[0].time : null;
+    isLoadingMore = false;
+    if (payload.no_more_history) noMoreHistory = true;
+
+    if (priorRange && delta !== 0) {
+      chart.timeScale().setVisibleLogicalRange({
+        from: priorRange.from + delta,
+        to: priorRange.to + delta,
+      });
+    }
+  }
+
+  // Called by Python when a history request comes back empty/failed, so the
+  // user can pan again to retry rather than being stuck forever.
+  function resetLoadingMoreFlag() {
+    isLoadingMore = false;
+  }
+
+  function setNoMoreHistory(value) {
+    noMoreHistory = !!value;
+  }
+
+  chart.timeScale().subscribeVisibleLogicalRangeChange(function (range) {
+    if (!range || isLoadingMore || noMoreHistory) return;
+    if (earliestCandleTime === null || !window.bridge) return;
+    // Bars are indexed oldest-to-newest starting at 0; `from` nearing 0
+    // means the user has panned close to the left (oldest-loaded) edge.
+    if (range.from < 20) {
+      isLoadingMore = true;
+      window.bridge.request_more_history(earliestCandleTime);
+    }
+  });
 
   function resize() {
     chart.resize(container.clientWidth, container.clientHeight);
@@ -215,6 +280,9 @@
   // the QWebChannel bridge signals wired up below.
   window.renderChart = renderChart;
   window.updateLastCandle = updateLastCandle;
+  window.prependHistory = prependHistory;
+  window.resetLoadingMoreFlag = resetLoadingMoreFlag;
+  window.setNoMoreHistory = setNoMoreHistory;
 
   if (window.qt && window.qt.webChannelTransport) {
     new QWebChannel(window.qt.webChannelTransport, function (channel) {
@@ -224,6 +292,15 @@
       });
       window.bridge.update_last_candle_signal.connect(function (payloadJson) {
         updateLastCandle(JSON.parse(payloadJson));
+      });
+      window.bridge.prepend_history_signal.connect(function (payloadJson) {
+        prependHistory(JSON.parse(payloadJson));
+      });
+      window.bridge.no_more_history_signal.connect(function () {
+        setNoMoreHistory(true);
+      });
+      window.bridge.history_request_failed_signal.connect(function () {
+        resetLoadingMoreFlag();
       });
       window.bridge.ready();
     });

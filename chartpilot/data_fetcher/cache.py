@@ -78,6 +78,24 @@ class CandleCache:
         df = pd.DataFrame(rows, columns=CANDLE_COLUMNS).iloc[::-1].reset_index(drop=True)
         return df
 
+    def get_before(self, symbol: str, timeframe: str, before_open_time_ms: int, limit: int) -> pd.DataFrame | None:
+        """Return up to `limit` cached candles strictly older than
+        `before_open_time_ms`, oldest to newest. No TTL check: historical
+        candles (unlike the most recent one) never go stale once closed."""
+        rows = self._conn.execute(
+            """
+            SELECT open_time, open, high, low, close, volume
+            FROM candles
+            WHERE symbol = ? AND timeframe = ? AND open_time < ?
+            ORDER BY open_time DESC
+            LIMIT ?
+            """,
+            (symbol, timeframe, before_open_time_ms, limit),
+        ).fetchall()
+        if not rows:
+            return None
+        return pd.DataFrame(rows, columns=CANDLE_COLUMNS).iloc[::-1].reset_index(drop=True)
+
     def upsert(self, symbol: str, timeframe: str, df: pd.DataFrame) -> None:
         records = [
             (symbol, timeframe, int(r.open_time), float(r.open), float(r.high), float(r.low), float(r.close), float(r.volume))

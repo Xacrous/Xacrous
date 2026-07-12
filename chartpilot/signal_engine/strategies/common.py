@@ -7,20 +7,9 @@ from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 
+from chartpilot.data_fetcher.exchange_client import timeframe_to_seconds
 from chartpilot.signal_engine.base_strategy import Signal
 from chartpilot.signal_engine.scorer import ScoreFactor, rationale_lines, total_confidence
-
-_TIMEFRAME_SECONDS = {
-    "1m": 60, "5m": 300, "15m": 900,
-    "1h": 3600, "4h": 14400, "1d": 86400,
-}
-
-
-def timeframe_to_seconds(timeframe: str) -> int:
-    try:
-        return _TIMEFRAME_SECONDS[timeframe]
-    except KeyError as exc:
-        raise ValueError(f"unknown timeframe {timeframe!r}") from exc
 
 
 def compute_expiry(df: pd.DataFrame, timeframe: str, candles: int) -> str:
