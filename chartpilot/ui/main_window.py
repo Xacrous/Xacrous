@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from qfluentwidgets import FluentIcon as FIF
-from qfluentwidgets import MSFluentWindow, NavigationItemPosition, setTheme, Theme
+from qfluentwidgets import MessageBox, MSFluentWindow, NavigationItemPosition, setTheme, Theme
 
 from chartpilot.data_fetcher.cache import CandleCache
 from chartpilot.data_fetcher.exchange_client import ExchangeClient
@@ -46,7 +46,7 @@ class MainWindow(MSFluentWindow):
         self.trade_interface = AnalysisInterface(
             self.exchange_client, prefs.symbol, "5m", "trade", "vwap_crossover", self.signal_log,
             refresh_interval_seconds=prefs.refresh_interval_seconds, fixed_mode="trade",
-            object_name="tradeInterface", parent=self,
+            object_name="tradeInterface", config_store=self.config_store, parent=self,
         )
         self.backtest_interface = BacktestInterface(self.exchange_client, self.signal_log, self)
         self.about_interface = AboutInterface(self)
@@ -91,6 +91,19 @@ class MainWindow(MSFluentWindow):
             self.trade_interface.set_refresh_interval_seconds(prefs.refresh_interval_seconds)
 
     def closeEvent(self, event) -> None:
+        auto_trader = self.trade_interface._auto_trader
+        if auto_trader is not None and auto_trader.position is not None:
+            box = MessageBox(
+                "Auto-trade position still open",
+                "The Trade tab has an open position with a client-side (not exchange-side) "
+                "stop-loss/take-profit — closing ChartPilot now means that position will no "
+                "longer be monitored or auto-closed until you reopen the app. Close anyway?",
+                self,
+            )
+            if not box.exec():
+                event.ignore()
+                return
+
         self.analysis_interface.shutdown()
         self.trade_interface.shutdown()
         prefs = self.config_store.load()

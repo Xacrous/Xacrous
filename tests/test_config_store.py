@@ -71,3 +71,33 @@ def test_clear_api_key_removes_saved_credentials(store):
 def test_clear_api_key_is_a_noop_when_nothing_saved(store):
     store.clear_api_key()  # should not raise
     assert store.get_api_key() is None
+
+
+def test_trading_api_key_round_trip(store):
+    assert store.get_trading_api_key() is None
+    store.set_trading_api_key("tkey123", "tsecret456")
+    assert store.get_trading_api_key() == ("tkey123", "tsecret456")
+
+
+def test_trading_api_key_is_isolated_from_read_only_key(store):
+    store.set_api_key("readonly_key", "readonly_secret")
+    store.set_trading_api_key("trading_key", "trading_secret")
+    assert store.get_api_key() == ("readonly_key", "readonly_secret")
+    assert store.get_trading_api_key() == ("trading_key", "trading_secret")
+
+    store.clear_trading_api_key()
+    assert store.get_trading_api_key() is None
+    assert store.get_api_key() == ("readonly_key", "readonly_secret")  # untouched
+
+
+def test_clear_trading_api_key_is_a_noop_when_nothing_saved(store):
+    store.clear_trading_api_key()  # should not raise
+    assert store.get_trading_api_key() is None
+
+
+def test_auto_trade_preferences_default_to_safe_values(store):
+    prefs = store.load()
+    assert prefs.auto_trade_use_testnet is True
+    assert prefs.auto_trade_amount_usdt == 50.0
+    assert prefs.auto_trade_profit_pct == 2.0
+    assert prefs.auto_trade_loss_pct == 1.0

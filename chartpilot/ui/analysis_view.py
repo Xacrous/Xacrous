@@ -18,12 +18,15 @@ from datetime import datetime
 
 import pandas as pd
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
-from PyQt6.QtWidgets import QFrame, QHBoxLayout, QInputDialog, QScrollArea, QSplitter, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QFormLayout, QFrame, QHBoxLayout, QInputDialog, QScrollArea, QSplitter, QVBoxLayout, QWidget
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
     ComboBox,
+    DoubleSpinBox,
+    InfoBar,
     LineEdit,
+    MessageBox,
     PrimaryPushButton,
     SegmentedWidget,
     StrongBodyLabel,
@@ -33,11 +36,13 @@ from qfluentwidgets import (
 
 from chartpilot.chart_view.chart_widget import ChartWidget
 from chartpilot.data_fetcher.exchange_client import ExchangeClient, SymbolNotFoundError
+from chartpilot.settings.config_store import ConfigStore
 from chartpilot.signal_engine.base_strategy import Mode, Signal
 from chartpilot.signal_engine.pipeline import enrich_signal, resolve_pending_for_window
 from chartpilot.signal_engine.registry import get_strategy, list_strategies
 from chartpilot.signal_engine.signal_log import SignalLog
 from chartpilot.ta_engine.indicators import CANDLE_LIMIT, IndicatorSet, compute
+from chartpilot.trade_engine.auto_trader import AutoTraderWorker, ClosedTrade, OpenPosition
 
 logger = logging.getLogger(__name__)
 
@@ -221,9 +226,26 @@ class SignalPanel(QWidget):
         layout.addWidget(self.expiry_label)
         layout.addWidget(CaptionLabel("Rationale", self))
         layout.addLayout(self.rationale_container)
+
+        layout.addWidget(CaptionLabel("PREVIOUS SIGNALS", self))
+        self._history_container = QWidget(self)
+        self._history_layout = QVBoxLayout(self._history_container)
+        self._history_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self._history_layout.setContentsMargins(0, 0, 0, 0)
+        self._history_layout.setSpacing(2)
+        history_scroll = QScrollArea(self)
+        history_scroll.setWidgetResizable(True)
+        history_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        history_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        history_scroll.setMaximumHeight(160)
+        history_scroll.setWidget(self._history_container)
+        layout.addWidget(history_scroll)
+        self._history_labels: list[CaptionLabel] = []
+
         layout.addStretch(1)
 
         self.show_empty_state()
+        self.show_history([])
 
     def _clear_rationale(self) -> None:
         while self.rationale_container.count():
@@ -263,6 +285,135 @@ class SignalPanel(QWidget):
             self.rationale_container.addWidget(label)
             self.rationale_labels.append(label)
 
+    def show_history(self, rows: list[dict]) -> None:
+        for label in self._history_labels:
+            label.deleteLater()
+        self._history_labels = []
+        if not rows:
+            empty = CaptionLabel("No previous signals yet.", self)
+            self._history_layout.addWidget(empty)
+            self._history_labels.append(empty)
+            return
+        status_text = {"pending": "… pending", "hit_tp": "✓ hit TP", "hit_sl": "✗ hit SL", "expired": "⏱ expired"}
+        for row in rows:
+            arrow = "▲" if row["direction"] == "long" else "▼"
+            status = status_text.get(row["status"], row["status"])
+            label = CaptionLabel(f"{arrow} {row['generated_at'][:16]} · entry {row['entry']:g} · {status}", self)
+            label.setWordWrap(True)
+            self._history_layout.addWidget(label)
+            self._history_labels.append(label)
+
+
+class AutoTradePanel(QWidget):
+    """Trade tab-only control surface: dollar amount / TP% / SL% inputs,
+    the Start/Stop toggle, and a running P&L scoreboard that resets every
+    time Start is pressed. Purely a view — AnalysisInterface owns the
+    actual AutoTraderWorker and pushes state into this panel."""
+
+    start_requested = pyqtSignal()
+    stop_requested = pyqtSignal()
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setFixedWidth(220)
+        self._running = False
+        self._trades: list[ClosedTrade] = []
+
+        self.mode_label = StrongBodyLabel("", self)
+
+        self.amount_spin = DoubleSpinBox(self)
+        self.amount_spin.setRange(1.0, 1_000_000.0)
+        self.amount_spin.setDecimals(2)
+        self.amount_spin.setValue(50.0)
+        self.amount_spin.setSuffix(" USDT")
+
+        self.profit_spin = DoubleSpinBox(self)
+        self.profit_spin.setRange(0.1, 100.0)
+        self.profit_spin.setDecimals(2)
+        self.profit_spin.setValue(2.0)
+        self.profit_spin.setSuffix(" %")
+
+        self.loss_spin = DoubleSpinBox(self)
+        self.loss_spin.setRange(0.1, 100.0)
+        self.loss_spin.setDecimals(2)
+        self.loss_spin.setValue(1.0)
+        self.loss_spin.setSuffix(" %")
+
+        form = QFormLayout()
+        form.addRow("Amount / trade", self.amount_spin)
+        form.addRow("Take profit", self.profit_spin)
+        form.addRow("Stop loss", self.loss_spin)
+
+        self.start_stop_button = PrimaryPushButton("▶ Start Auto-Trade", self)
+        self.start_stop_button.clicked.connect(self._on_button_clicked)
+
+        self.status_label = CaptionLabel("Stopped", self)
+        self.status_label.setWordWrap(True)
+
+        self.pnl_label = StrongBodyLabel("$0.00 (0.00%)", self)
+        self.trade_count_label = BodyLabel("0 trades · 0W / 0L", self)
+
+        layout = QVBoxLayout(self)
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        layout.addWidget(CaptionLabel("AUTO-TRADE", self))
+        layout.addWidget(self.mode_label)
+        layout.addLayout(form)
+        layout.addWidget(self.start_stop_button)
+        layout.addWidget(self.status_label)
+        layout.addWidget(CaptionLabel("STATISTICS (since Start)", self))
+        layout.addWidget(self.pnl_label)
+        layout.addWidget(self.trade_count_label)
+        layout.addStretch(1)
+
+        self.set_mode_label(testnet=True)
+
+    def _on_button_clicked(self) -> None:
+        if self._running:
+            self.stop_requested.emit()
+        else:
+            self.start_requested.emit()
+
+    @property
+    def amount(self) -> float:
+        return self.amount_spin.value()
+
+    @property
+    def profit_pct(self) -> float:
+        return self.profit_spin.value()
+
+    @property
+    def loss_pct(self) -> float:
+        return self.loss_spin.value()
+
+    def set_running(self, running: bool) -> None:
+        self._running = running
+        self.start_stop_button.setText("■ Stop Auto-Trade" if running else "▶ Start Auto-Trade")
+        self.amount_spin.setEnabled(not running)
+        self.profit_spin.setEnabled(not running)
+        self.loss_spin.setEnabled(not running)
+
+    def set_mode_label(self, testnet: bool) -> None:
+        self.mode_label.setText("🧪 TESTNET (fake funds)" if testnet else "⚠ LIVE — REAL MONEY")
+
+    def set_status(self, text: str) -> None:
+        self.status_label.setText(text)
+
+    def reset_stats(self) -> None:
+        self._trades = []
+        self.pnl_label.setText("$0.00 (0.00%)")
+        self.trade_count_label.setText("0 trades · 0W / 0L")
+
+    def record_closed_trade(self, trade: ClosedTrade) -> None:
+        self._trades.append(trade)
+        total_quote = sum(t.pnl_quote for t in self._trades)
+        total_cost_basis = sum(t.entry_price * t.quantity for t in self._trades)
+        total_pct = (total_quote / total_cost_basis * 100.0) if total_cost_basis else 0.0
+        wins = sum(1 for t in self._trades if t.pnl_quote > 0)
+        losses = len(self._trades) - wins
+        sign = "+" if total_quote >= 0 else ""
+        self.pnl_label.setText(f"{sign}${total_quote:,.2f} ({sign}{total_pct:.2f}%)")
+        self.trade_count_label.setText(f"{len(self._trades)} trades · {wins}W / {losses}L")
+
 
 class AnalysisInterface(QWidget):
     def __init__(
@@ -276,15 +427,18 @@ class AnalysisInterface(QWidget):
         refresh_interval_seconds: int = 30,
         fixed_mode: Mode | None = None,
         object_name: str = "analysisInterface",
+        config_store: ConfigStore | None = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self.setObjectName(object_name)
         self.exchange_client = exchange_client
         self.signal_log = signal_log
+        self.config_store = config_store
         self._worker: _SignalWorker | None = None
         self._live_thread: _LiveFeedThread | None = None
         self._history_worker: _HistoryWorker | None = None
+        self._auto_trader: AutoTraderWorker | None = None
         self._current_df: pd.DataFrame | None = None
         self._no_more_history = False
         self._fixed_mode = fixed_mode
@@ -348,6 +502,20 @@ class AnalysisInterface(QWidget):
         splitter.addWidget(self.signal_panel)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 0)
+
+        # Auto-trade control + stats panel: Trade tab only.
+        self.auto_trade_panel: AutoTradePanel | None = None
+        if fixed_mode == "trade" and config_store is not None:
+            self.auto_trade_panel = AutoTradePanel(self)
+            self.auto_trade_panel.start_requested.connect(self._on_auto_trade_start_requested)
+            self.auto_trade_panel.stop_requested.connect(self._on_auto_trade_stop_requested)
+            prefs = config_store.load()
+            self.auto_trade_panel.amount_spin.setValue(prefs.auto_trade_amount_usdt)
+            self.auto_trade_panel.profit_spin.setValue(prefs.auto_trade_profit_pct)
+            self.auto_trade_panel.loss_spin.setValue(prefs.auto_trade_loss_pct)
+            self.auto_trade_panel.set_mode_label(prefs.auto_trade_use_testnet)
+            splitter.addWidget(self.auto_trade_panel)
+            splitter.setStretchFactor(2, 0)
 
         self.watchlist_panel = WatchlistPanel(DEFAULT_WATCHLIST, self)
         self.watchlist_panel.symbol_selected.connect(self._on_watchlist_symbol_selected)
@@ -437,14 +605,47 @@ class AnalysisInterface(QWidget):
     def _on_success(self, df, indicators: IndicatorSet, signal: Signal | None) -> None:
         self._current_df = df
         self._no_more_history = False
+        strategy = get_strategy(self.selected_strategy_id)
+        self._display_signal(df, indicators, signal, strategy)
+        last_close = float(df["close"].iloc[-1])
+        self.status_label.setText(f"{last_close:g} · ● Live (last refresh)")
+        self._restart_live_feed(str(df.attrs.get("symbol", "")), str(df.attrs.get("timeframe", "")))
+
+    def _restore_pending_signal(self, df: pd.DataFrame, strategy) -> Signal | None:
+        """A strategy only returns non-None on the exact candle its setup
+        completes — every render after that would otherwise clear the
+        chart's TP/SL lines and the panel back to "No signal" even though
+        the trade is still open. Fall back to the most recent still-pending
+        row in the forward log for this exact context so it stays visible
+        until it actually resolves."""
+        if self.signal_log is None:
+            return None
+        symbol = str(df.attrs.get("symbol", ""))
+        timeframe = str(df.attrs.get("timeframe", ""))
+        row = self.signal_log.get_latest_pending(symbol, timeframe, strategy.id)
+        if row is None:
+            return None
+        return Signal(
+            symbol=row["symbol"], timeframe=row["timeframe"], mode=strategy.mode, strategy=row["strategy"],
+            direction=row["direction"], entry=row["entry"], take_profit=row["take_profit"], stop_loss=row["stop_loss"],
+            confidence=row["confidence"], reward_risk_ratio=row["reward_risk_ratio"],
+            rationale=[f"Still-open signal from {row['generated_at']} — restored from the signal log."],
+            generated_at=row["generated_at"], expires_at=row["expires_at"],
+        )
+
+    def _display_signal(self, df: pd.DataFrame, indicators: IndicatorSet, signal: Signal | None, strategy) -> None:
+        if signal is None:
+            signal = self._restore_pending_signal(df, strategy)
         self.chart_widget.render(df, indicators, signal)
         if signal is not None:
             self.signal_panel.show_signal(signal)
         else:
             self.signal_panel.show_empty_state()
-        last_close = float(df["close"].iloc[-1])
-        self.status_label.setText(f"{last_close:g} · ● Live (last refresh)")
-        self._restart_live_feed(str(df.attrs.get("symbol", "")), str(df.attrs.get("timeframe", "")))
+        if self.signal_log is not None:
+            symbol = str(df.attrs.get("symbol", ""))
+            timeframe = str(df.attrs.get("timeframe", ""))
+            rows = self.signal_log.list_for_symbol(symbol, timeframe=timeframe, strategy=strategy.id, limit=15)
+            self.signal_panel.show_history(rows)
 
     def _on_error(self, message: str) -> None:
         self.signal_panel.show_empty_state()
@@ -498,11 +699,7 @@ class AnalysisInterface(QWidget):
         resolve_pending_for_window(df, self.signal_log)
         if signal is not None:
             enrich_signal(df, self._mode, strategy, signal, self.signal_log)
-        self.chart_widget.render(df, indicators, signal)
-        if signal is not None:
-            self.signal_panel.show_signal(signal)
-        else:
-            self.signal_panel.show_empty_state()
+        self._display_signal(df, indicators, signal, strategy)
 
     def _on_kline_closed(self, payload: dict) -> None:
         if self._current_df is None:
@@ -588,6 +785,80 @@ class AnalysisInterface(QWidget):
         logger.warning("Live feed error: %s", message)
         self.status_label.setText("⚠ Live feed reconnecting…")
 
+    def _on_auto_trade_start_requested(self) -> None:
+        panel = self.auto_trade_panel
+        if panel is None or self.config_store is None or self._auto_trader is not None:
+            return
+
+        trading_key = self.config_store.get_trading_api_key()
+        if trading_key is None:
+            InfoBar.error(title="No trading API key", content="Add a trading-enabled Binance API key in Settings first.", parent=self)
+            return
+
+        prefs = self.config_store.load()
+        if not prefs.auto_trade_use_testnet:
+            box = MessageBox(
+                "Start LIVE auto-trading?",
+                "This places REAL orders on your Binance account with REAL money, fully "
+                "autonomously — every qualifying VWAP Crossover signal will be traded "
+                "immediately with no per-trade confirmation, until you click Stop. "
+                "Continue?",
+                self,
+            )
+            if not box.exec():
+                return
+
+        prefs.auto_trade_amount_usdt = panel.amount
+        prefs.auto_trade_profit_pct = panel.profit_pct
+        prefs.auto_trade_loss_pct = panel.loss_pct
+        self.config_store.save(prefs)
+
+        exchange_client = ExchangeClient(
+            self.exchange_client.cache,
+            api_key=trading_key[0], api_secret=trading_key[1],
+            testnet=prefs.auto_trade_use_testnet,
+        )
+        symbol = self.symbol_edit.text().strip().upper()
+        timeframe = self.timeframe_combo.currentText()
+        strategy_id = self.selected_strategy_id
+
+        self._auto_trader = AutoTraderWorker(
+            exchange_client, symbol, timeframe, strategy_id,
+            panel.amount, panel.profit_pct, panel.loss_pct,
+        )
+        self._auto_trader.status_changed.connect(panel.set_status)
+        self._auto_trader.trade_opened.connect(self._on_auto_trade_opened)
+        self._auto_trader.trade_closed.connect(self._on_auto_trade_closed)
+        self._auto_trader.error.connect(self._on_auto_trade_error)
+
+        panel.reset_stats()
+        panel.set_mode_label(prefs.auto_trade_use_testnet)
+        panel.set_running(True)
+        self._auto_trader.start()
+
+    def _on_auto_trade_stop_requested(self) -> None:
+        panel = self.auto_trade_panel
+        if self._auto_trader is not None:
+            self._auto_trader.stop()
+            self._auto_trader = None
+        if panel is not None:
+            panel.set_running(False)
+            panel.set_status("Stopped")
+
+    def _on_auto_trade_opened(self, position: OpenPosition) -> None:
+        logger.info("Auto-trade opened: %s @ %s", position.symbol, position.entry_price)
+
+    def _on_auto_trade_closed(self, trade: ClosedTrade) -> None:
+        if self.auto_trade_panel is not None:
+            self.auto_trade_panel.record_closed_trade(trade)
+
+    def _on_auto_trade_error(self, message: str) -> None:
+        logger.warning("Auto-trade error: %s", message)
+        InfoBar.warning(title="Auto-trade", content=message, parent=self)
+
     def shutdown(self) -> None:
         self._refresh_timer.stop()
         self._stop_live_feed()
+        if self._auto_trader is not None:
+            self._auto_trader.stop()
+            self._auto_trader = None

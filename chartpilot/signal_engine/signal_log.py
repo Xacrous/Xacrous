@@ -146,6 +146,42 @@ class SignalLog:
         wins = sum(1 for _, status in rows if status == "hit_tp")
         return wins / len(rows), len(rows)
 
+    def get_latest_pending(self, symbol: str, timeframe: str, strategy_id: str) -> dict | None:
+        """Most recent still-open signal for this exact chart context, so
+        the UI can keep showing it (chart lines + panel) across refreshes
+        that don't produce a fresh trigger — a strategy only fires on the
+        exact candle its setup completes, not on every candle the trade
+        stays open, so without this the display would otherwise flash the
+        signal for one render and then clear it on the very next one."""
+        with self._lock:
+            row = self._conn.execute(
+                f"""
+                SELECT {', '.join(_LIST_COLUMNS)} FROM signal_log
+                WHERE symbol = ? AND timeframe = ? AND strategy = ? AND status = 'pending'
+                ORDER BY id DESC LIMIT 1
+                """,
+                (symbol, timeframe, strategy_id),
+            ).fetchone()
+        return dict(zip(_LIST_COLUMNS, row)) if row is not None else None
+
+    def list_for_symbol(self, symbol: str, timeframe: str | None = None, strategy: str | None = None, limit: int = 20) -> list[dict]:
+        """Recent signals scoped to what's currently on screen, for a
+        "previous signals" panel — list_recent() is unscoped and mixes
+        every symbol/strategy together."""
+        query = f"SELECT {', '.join(_LIST_COLUMNS)} FROM signal_log WHERE symbol = ?"
+        params: list = [symbol]
+        if timeframe is not None:
+            query += " AND timeframe = ?"
+            params.append(timeframe)
+        if strategy is not None:
+            query += " AND strategy = ?"
+            params.append(strategy)
+        query += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+        with self._lock:
+            rows = self._conn.execute(query, params).fetchall()
+        return [dict(zip(_LIST_COLUMNS, row)) for row in rows]
+
     def list_recent(self, limit: int = 100) -> list[dict]:
         with self._lock:
             cursor = self._conn.execute(

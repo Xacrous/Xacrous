@@ -59,9 +59,11 @@ class ExchangeClient:
         api_key: str | None = None,
         api_secret: str | None = None,
         cache_ttl_seconds: float = 30.0,
+        testnet: bool = False,
     ) -> None:
         self.cache = cache
         self.cache_ttl_seconds = cache_ttl_seconds
+        self.testnet = testnet
         # Explicit spot pin: ChartPilot is spot-only, execution-free analysis
         # (never futures/margin) — pin ccxt's defaultType rather than relying
         # on its own default, so a future ccxt upgrade can't silently change it.
@@ -70,6 +72,12 @@ class ExchangeClient:
             config["apiKey"] = api_key
             config["secret"] = api_secret
         self.exchange = ccxt.binance(config)
+        if testnet:
+            # Binance Spot Testnet (testnet.binance.vision) — fake funds,
+            # real API behavior. Used by the Trade tab's auto-trader to
+            # validate real order placement before it's ever pointed at a
+            # live account.
+            self.exchange.set_sandbox_mode(True)
         self.rate_limiter = TokenBucketRateLimiter(
             _DEFAULT_BUCKET_CAPACITY, _DEFAULT_REFILL_PER_SECOND
         )
@@ -155,6 +163,8 @@ class ExchangeClient:
 
     async def _run_live_feed(self, unified_symbol: str, timeframe: str, on_update: OnLiveUpdate, stop_event: threading.Event) -> None:
         pro_exchange = ccxtpro.binance({"enableRateLimit": True, "options": {"defaultType": "spot"}})
+        if self.testnet:
+            pro_exchange.set_sandbox_mode(True)
         tasks = [
             asyncio.create_task(self._watch_ticker_loop(pro_exchange, unified_symbol, on_update, stop_event)),
             asyncio.create_task(self._watch_kline_loop(pro_exchange, unified_symbol, timeframe, on_update, stop_event)),
@@ -194,6 +204,25 @@ class ExchangeClient:
                 logger.warning("Kline WS error for %s %s: %s", unified_symbol, timeframe, exc)
                 on_update("error", {"message": str(exc)})
                 await asyncio.sleep(_WATCH_ERROR_BACKOFF)
+
+    def place_market_buy_quote(self, symbol: str, quote_amount: float) -> dict:
+        """Spot market buy sized in quote-currency terms (e.g. spend $50 of
+        USDT), via Binance's native quoteOrderQty so no manual
+        price-to-base-quantity conversion or precision rounding is needed
+        client-side. Places a REAL order — requires a trading-permission
+        API key. Used only by the Trade tab's auto-trader, never by the
+        read-only analysis/chart data path.
+        """
+        unified_symbol = self.validate_symbol(symbol)
+        self.rate_limiter.acquire(weight=1.0)
+        return self.exchange.create_order(unified_symbol, "market", "buy", None, None, {"quoteOrderQty": quote_amount})
+
+    def place_market_sell(self, symbol: str, amount: float) -> dict:
+        """Spot market sell of `amount` units of the base currency. Places
+        a REAL order — requires a trading-permission API key."""
+        unified_symbol = self.validate_symbol(symbol)
+        self.rate_limiter.acquire(weight=1.0)
+        return self.exchange.create_order(unified_symbol, "market", "sell", amount)
 
     def _fetch_ohlcv_with_retry(self, unified_symbol: str, timeframe: str, limit: int, since: int | None = None) -> list:
         last_error: Exception | None = None

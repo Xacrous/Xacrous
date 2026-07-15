@@ -112,6 +112,44 @@ def test_win_rate_filters_by_confidence_band(log):
     assert log.win_rate("trend_following_ma_cross", confidence=20, band=5) is None
 
 
+def test_get_latest_pending_returns_none_when_empty(log):
+    assert log.get_latest_pending("BTCUSDT", "4h", "trend_following_ma_cross") is None
+
+
+def test_get_latest_pending_returns_pending_row(log):
+    log.record_if_new(_signal())
+    row = log.get_latest_pending("BTCUSDT", "4h", "trend_following_ma_cross")
+    assert row is not None
+    assert row["symbol"] == "BTCUSDT"
+    assert row["status"] == "pending"
+
+
+def test_get_latest_pending_none_once_resolved(log):
+    log.record_if_new(_signal())
+    df = _candles_after([1, 2], [[101, 102, 100, 101.5], [102, 112, 101, 111]])
+    log.resolve_pending("BTCUSDT", "4h", df)
+    assert log.get_latest_pending("BTCUSDT", "4h", "trend_following_ma_cross") is None
+
+
+def test_get_latest_pending_scoped_to_strategy(log):
+    log.record_if_new(_signal())
+    assert log.get_latest_pending("BTCUSDT", "4h", "macd_momentum") is None
+
+
+def test_list_for_symbol_filters_and_orders_newest_first(log):
+    log.record_if_new(_signal())
+    df = _candles_after([1, 2], [[101, 102, 100, 101.5], [102, 112, 101, 111]])
+    log.resolve_pending("BTCUSDT", "4h", df)
+    log.record_if_new(_signal(generated_at="2026-01-02T00:00:00+00:00"))
+
+    rows = log.list_for_symbol("BTCUSDT", timeframe="4h", strategy="trend_following_ma_cross")
+    assert len(rows) == 2
+    assert rows[0]["status"] == "pending"  # most recent first
+    assert rows[1]["status"] == "hit_tp"
+
+    assert log.list_for_symbol("ETHUSDT") == []
+
+
 def test_export_csv_writes_header_and_rows(log, tmp_path):
     log.record_if_new(_signal())
     out = tmp_path / "export.csv"
