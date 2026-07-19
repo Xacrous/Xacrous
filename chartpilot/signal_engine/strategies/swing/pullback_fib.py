@@ -28,7 +28,10 @@ class PullbackFibStrategy(BaseStrategy):
     id = "pullback_fibonacci"
     display_name = "Pullback / Fibonacci Retracement"
     mode = "swing"
-    required_indicators = ["sma50", "rsi14", "atr14", "volume_sma20"]
+    # "fibonacci" isn't a raw IndicatorSet field — it's a display flag the
+    # chart uses to decide whether to draw fib retracement lines, alongside
+    # the real indicator names this strategy's evaluate() actually reads.
+    required_indicators = ["sma50", "rsi14", "atr14", "volume_sma20", "fibonacci"]
 
     def evaluate(self, df: pd.DataFrame, indicators: IndicatorSet) -> Signal | None:
         long_signal = self._evaluate_direction(df, indicators, bullish=True)

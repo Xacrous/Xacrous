@@ -58,6 +58,77 @@ def _series_to_points(times_ms: pd.Series, values: pd.Series) -> list[dict]:
     return points
 
 
+def build_chart_payload(df: pd.DataFrame, indicators: IndicatorSet, required_indicators: list[str] | None = None) -> dict:
+    """`required_indicators` scopes overlays/pivots/fibonacci/volume profile
+    down to what the currently-selected strategy actually uses (each
+    strategy already declares this via `BaseStrategy.required_indicators`)
+    — pass None to show the full mode-level indicator set (e.g. for callers
+    with no strategy context). A module-level function (no widget/QWebEngine
+    dependency) so it's plainly unit-testable."""
+    def wants(*names: str) -> bool:
+        return required_indicators is None or any(name in required_indicators for name in names)
+
+    times_ms = df["open_time"]
+    candles = [
+        {
+            "time": int(t) // 1000,
+            "open": round(float(o), 8),
+            "high": round(float(h), 8),
+            "low": round(float(low), 8),
+            "close": round(float(c), 8),
+        }
+        for t, o, h, low, c in zip(times_ms, df["open"], df["high"], df["low"], df["close"])
+    ]
+    volume = [
+        {
+            "time": int(t) // 1000,
+            "value": round(float(v), 8),
+            "color": "#16C784" if c >= o else "#EA3943",
+        }
+        for t, v, o, c in zip(times_ms, df["volume"], df["open"], df["close"])
+    ]
+    if indicators.mode == "swing":
+        overlays = {}
+        if wants("sma20"):
+            overlays["sma20"] = _series_to_points(times_ms, indicators.sma20)
+        if wants("sma50"):
+            overlays["sma50"] = _series_to_points(times_ms, indicators.sma50)
+        if wants("sma200"):
+            overlays["sma200"] = _series_to_points(times_ms, indicators.sma200)
+        pivots = indicators.pivots.as_dict() if (indicators.pivots is not None and wants("pivots")) else None
+        fib = detect_fibonacci_retracement(df, indicators.atr14) if wants("fibonacci") else None
+        fibonacci = {"direction": fib.direction, "levels": {str(k): v for k, v in fib.levels.items()}} if fib is not None else None
+        volume_profile = None
+    else:
+        overlays = {}
+        if wants("ema9"):
+            overlays["ema9"] = _series_to_points(times_ms, indicators.ema9)
+        if wants("ema21"):
+            overlays["ema21"] = _series_to_points(times_ms, indicators.ema21)
+        if wants("bb_lower", "bb_mid", "bb_upper", "bb_percent"):
+            overlays["bb_lower"] = _series_to_points(times_ms, indicators.bb_lower)
+            overlays["bb_mid"] = _series_to_points(times_ms, indicators.bb_mid)
+            overlays["bb_upper"] = _series_to_points(times_ms, indicators.bb_upper)
+        if wants("vwap"):
+            overlays["vwap"] = _series_to_points(times_ms, indicators.vwap)
+        pivots = None
+        fibonacci = None
+        volume_profile = (
+            [{"price_low": b.price_low, "price_high": b.price_high, "volume": b.volume} for b in indicators.volume_profile.bins]
+            if (indicators.volume_profile is not None and wants("volume_profile"))
+            else None
+        )
+
+    return {
+        "candles": candles,
+        "volume": volume,
+        "overlays": overlays,
+        "pivots": pivots,
+        "fibonacci": fibonacci,
+        "volume_profile": volume_profile,
+    }
+
+
 class ChartWidget(QWebEngineView):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -67,64 +138,8 @@ class ChartWidget(QWebEngineView):
         self.page().setWebChannel(self.channel)
         self.load(QUrl.fromLocalFile(str(_WEB_DIR / "chart.html")))
 
-    def _build_payload(self, df: pd.DataFrame, indicators: IndicatorSet) -> dict:
-        times_ms = df["open_time"]
-        candles = [
-            {
-                "time": int(t) // 1000,
-                "open": round(float(o), 8),
-                "high": round(float(h), 8),
-                "low": round(float(low), 8),
-                "close": round(float(c), 8),
-            }
-            for t, o, h, low, c in zip(times_ms, df["open"], df["high"], df["low"], df["close"])
-        ]
-        volume = [
-            {
-                "time": int(t) // 1000,
-                "value": round(float(v), 8),
-                "color": "#16C784" if c >= o else "#EA3943",
-            }
-            for t, v, o, c in zip(times_ms, df["volume"], df["open"], df["close"])
-        ]
-        if indicators.mode == "swing":
-            overlays = {
-                "sma20": _series_to_points(times_ms, indicators.sma20),
-                "sma50": _series_to_points(times_ms, indicators.sma50),
-                "sma200": _series_to_points(times_ms, indicators.sma200),
-            }
-            pivots = indicators.pivots.as_dict() if indicators.pivots is not None else None
-            fib = detect_fibonacci_retracement(df, indicators.atr14)
-            fibonacci = {"direction": fib.direction, "levels": {str(k): v for k, v in fib.levels.items()}} if fib is not None else None
-            volume_profile = None
-        else:
-            overlays = {
-                "ema9": _series_to_points(times_ms, indicators.ema9),
-                "ema21": _series_to_points(times_ms, indicators.ema21),
-                "bb_lower": _series_to_points(times_ms, indicators.bb_lower),
-                "bb_mid": _series_to_points(times_ms, indicators.bb_mid),
-                "bb_upper": _series_to_points(times_ms, indicators.bb_upper),
-                "vwap": _series_to_points(times_ms, indicators.vwap),
-            }
-            pivots = None
-            fibonacci = None
-            volume_profile = (
-                [{"price_low": b.price_low, "price_high": b.price_high, "volume": b.volume} for b in indicators.volume_profile.bins]
-                if indicators.volume_profile is not None
-                else None
-            )
-
-        return {
-            "candles": candles,
-            "volume": volume,
-            "overlays": overlays,
-            "pivots": pivots,
-            "fibonacci": fibonacci,
-            "volume_profile": volume_profile,
-        }
-
-    def render(self, df: pd.DataFrame, indicators: IndicatorSet, signal: Signal | None) -> None:
-        payload = self._build_payload(df, indicators)
+    def render(self, df: pd.DataFrame, indicators: IndicatorSet, signal: Signal | None, required_indicators: list[str] | None = None) -> None:
+        payload = build_chart_payload(df, indicators, required_indicators)
         payload["signal"] = (
             {
                 "direction": signal.direction,
@@ -137,12 +152,12 @@ class ChartWidget(QWebEngineView):
         )
         self.bridge.render_signal.emit(json.dumps(payload))
 
-    def prepend_history(self, df: pd.DataFrame, indicators: IndicatorSet, no_more_history: bool = False) -> None:
+    def prepend_history(self, df: pd.DataFrame, indicators: IndicatorSet, no_more_history: bool = False, required_indicators: list[str] | None = None) -> None:
         """Push a merged (older + already-loaded) candle set after a
         scroll-back pagination fetch. Deliberately doesn't touch the signal
         overlay — the current signal is about the latest candle and must
         not change just because older history loaded."""
-        payload = self._build_payload(df, indicators)
+        payload = build_chart_payload(df, indicators, required_indicators)
         payload["no_more_history"] = no_more_history
         self.bridge.prepend_history_signal.emit(json.dumps(payload))
 

@@ -636,7 +636,7 @@ class AnalysisInterface(QWidget):
     def _display_signal(self, df: pd.DataFrame, indicators: IndicatorSet, signal: Signal | None, strategy) -> None:
         if signal is None:
             signal = self._restore_pending_signal(df, strategy)
-        self.chart_widget.render(df, indicators, signal)
+        self.chart_widget.render(df, indicators, signal, required_indicators=strategy.required_indicators)
         if signal is not None:
             self.signal_panel.show_signal(signal)
         else:
@@ -775,7 +775,8 @@ class AnalysisInterface(QWidget):
         # Deliberately not re-running strategy.evaluate() here: the current
         # signal describes the latest candle and must not change just
         # because older history loaded further back on the chart.
-        self.chart_widget.prepend_history(merged, indicators, no_more_history=no_more)
+        strategy = get_strategy(self.selected_strategy_id)
+        self.chart_widget.prepend_history(merged, indicators, no_more_history=no_more, required_indicators=strategy.required_indicators)
 
     def _on_more_history_failed(self, message: str) -> None:
         logger.warning("History pagination failed: %s", message)
