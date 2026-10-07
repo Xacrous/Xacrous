@@ -61,6 +61,13 @@ def create_app(engine: Engine, start_engine: bool = True) -> FastAPI:
     async def status():
         return await engine.status()
 
+    @app.get("/api/candles")
+    async def candles(before: int | None = None):
+        try:
+            return {"symbol": engine.params.symbol, "candles": await engine.candles(before)}
+        except Exception as exc:  # noqa: BLE001 - e.g. network error while scrolling back
+            return JSONResponse({"detail": f"could not load older candles: {exc}"}, status_code=502)
+
     @app.get("/api/trades")
     def trades():
         return engine.store.trades(200, engine.account)

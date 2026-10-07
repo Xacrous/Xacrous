@@ -17,6 +17,10 @@ STEP_S = 0.2
 _QUOTES = ("FDUSD", "USDT", "USDC", "TUSD", "BTC", "ETH", "BNB", "EUR", "TRY", "BRL", "JPY")
 
 
+def _bar(c) -> dict:
+    return {"t": c.open_time // 1000, "o": c.open, "h": c.high, "l": c.low, "c": c.close}
+
+
 def _split_symbol(symbol: str) -> tuple[str, str]:
     """Best-effort BASE/QUOTE split, only used for the offline demo feed."""
     for q in _QUOTES:
@@ -186,10 +190,25 @@ class Engine:
         if book and book.ready:
             out["book"] = {"bids": book.bids[:12], "asks": book.asks[:12], "mid": book.mid,
                            "spread_bps": book.spread_bps, "microprice": book.microprice,
-                           "last_trade": f.flow.last_price, "candles": [
-                               {"t": c.open_time // 1000, "o": c.open, "h": c.high, "l": c.low, "c": c.close}
-                               for c in f.candles.items.values()][-90:]}
+                           "last_trade": f.flow.last_price,
+                           "candles": [_bar(c) for c in self._sorted_candles()[-2:]]}  # live tail only
         return out
+
+    def _sorted_candles(self) -> list:
+        items = self.feed.candles.items if self.feed else {}
+        return [items[k] for k in sorted(items)]
+
+    async def candles(self, before: int | None = None, limit: int = 1000) -> list[dict]:
+        """1-minute bars for the chart. Without ``before``: everything in memory. With ``before``
+        (seconds): up to ``limit`` older bars fetched from Binance, for scrolling back in time."""
+        if before is None:
+            return [_bar(c) for c in self._sorted_candles()]
+        if not self.exchange or not self.market:
+            return []  # demo feed has no older history
+        since = (before - limit * 60) * 1000
+        rows = await self.exchange.fetch_ohlcv(self.market.ccxt_symbol, "1m", since=since, limit=limit)
+        return [{"t": int(t) // 1000, "o": o, "h": h, "l": l, "c": c} for t, o, h, l, c, _ in rows
+                if int(t) // 1000 < before]
 
     def stats(self) -> dict:
         trades = [x for x in self.store.trades(5000, self.account) if x["symbol"] == self.params.symbol]

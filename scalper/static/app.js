@@ -35,10 +35,59 @@ function initChart() {
   candleSeries = chart.addCandlestickSeries({ upColor: css('--up'), downColor: css('--down'), borderVisible: false,
     wickUpColor: css('--up'), wickDownColor: css('--down') });
   window.addEventListener('resize', () => chart.resize(el.clientWidth, el.clientHeight));
+  chart.timeScale().subscribeVisibleLogicalRangeChange((r) => { if (r && r.from < 30) loadOlder(); });
 }
 function setLine(key, price, color, title) {
   if (lines[key]) { candleSeries.removePriceLine(lines[key]); delete lines[key]; }
   if (price) lines[key] = candleSeries.createPriceLine({ price, color, lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title });
+}
+
+/* ---------- chart history: full in-memory history, then older pages from Binance on scroll ---------- */
+let bars = [], historyBusy = false, historyDone = false, historySymbol = null;
+const toBar = (c) => ({ time: c.t, open: c.o, high: c.h, low: c.l, close: c.c });
+
+async function loadHistory() {
+  historyBusy = true; historyDone = false; bars = [];
+  candleSeries.setData([]);
+  try {
+    const r = await api('/api/candles');
+    historySymbol = r.symbol;
+    bars = r.candles.map(toBar);
+    candleSeries.setData(bars);
+  } catch (e) { console.error(e); }
+  historyBusy = false;
+  if (bars.length && bars.length < 300) await loadOlder();  // little in memory: fetch a page first
+  const n = bars.length;
+  chart.timeScale().setVisibleLogicalRange({ from: Math.max(0, n - 180), to: n + 5 });  // last ~3 hours
+  chartMeta();
+}
+
+async function loadOlder() {
+  if (historyBusy || historyDone || !bars.length) return;
+  historyBusy = true;
+  $('chart-meta').textContent = 'loading older candles…';
+  try {
+    const r = await api(`/api/candles?before=${bars[0].time}`);
+    if (r.symbol !== historySymbol) return;
+    const older = r.candles.map(toBar).filter((b) => b.time < bars[0].time);
+    if (!older.length) { historyDone = true; return; }
+    const range = chart.timeScale().getVisibleLogicalRange();
+    bars = older.concat(bars);
+    candleSeries.setData(bars);
+    if (range) chart.timeScale().setVisibleLogicalRange({ from: range.from + older.length, to: range.to + older.length });
+  } catch (e) {
+    historyDone = true;  // e.g. demo feed or offline: stop asking
+    console.error(e);
+  } finally {
+    historyBusy = false;
+    chartMeta();
+  }
+}
+
+function chartMeta() {
+  const span = bars.length ? (bars[bars.length - 1].time - bars[0].time) / 3600 : 0;
+  $('chart-meta').textContent = `${bars.length.toLocaleString()} candles · ${span >= 48 ? (span / 24).toFixed(1) + ' days' : span.toFixed(1) + ' h'}`
+    + (historyDone ? '' : ' · scroll left for more') + ' · entry · profit lock · stop';
 }
 
 /* ---------- order book ladder ---------- */
@@ -79,7 +128,7 @@ function render(s) {
   }
   $('mode').textContent = (s.demo ? 'DEMO · ' : '') + s.account.toUpperCase();
   $('mode').className = 'pill ' + mode;
-  if (lastSymbol !== st.symbol) { lastSymbol = st.symbol; $('symbol').value = st.symbol; candleSeries.setData([]); }
+  if (lastSymbol !== st.symbol) { lastSymbol = st.symbol; $('symbol').value = st.symbol; loadHistory(); }
   document.querySelectorAll('[data-unit=quote]').forEach((e) => { e.textContent = m ? `(${m.quote})` : ''; });
 
   // banner
@@ -125,7 +174,12 @@ function render(s) {
     ladder($('bids'), b.bids.slice(0, 10), 'bid', maxQ, mine);
     $('ladder-mid').textContent = `${px(b.mid)}  ·  micro ${px(b.microprice)}`;
     $('book-meta').textContent = `last trade ${px(b.last_trade)}`;
-    candleSeries.setData(b.candles.map((c) => ({ time: c.t, open: c.o, high: c.h, low: c.l, close: c.c })));
+    if (bars.length) for (const c of b.candles) {  // live: only the newest bars, so scroll/zoom stay put
+      if (c.t < bars[bars.length - 1].time) continue;
+      const bar = toBar(c);
+      if (c.t === bars[bars.length - 1].time) bars[bars.length - 1] = bar; else bars.push(bar);
+      candleSeries.update(bar);
+    }
   }
   setLine('entry', p?.avg || t?.buy_order?.price, css('--blue'), p ? 'entry' : 'buy');
   setLine('tp', p && !p.trailing ? p.tp_price : null, css('--up'), p?.mode === 'trail' ? 'min profit' : 'TP');

@@ -51,7 +51,7 @@ class Candle:
 class Candles:
     """1-minute candles, newest last."""
 
-    def __init__(self, keep: int = 200):
+    def __init__(self, keep: int = 1500):
         self.keep = keep
         self.items: dict[int, Candle] = {}
 

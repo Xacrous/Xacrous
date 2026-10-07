@@ -173,3 +173,26 @@ def test_binance_ioc_sell_sends_time_in_force():
     asyncio.run(BinanceBroker(ex, M).limit_sell_ioc(1.23456, 0.05))
     type_, side, qty, price, params = ex.created[0]
     assert (type_, side, qty, price, params["timeInForce"]) == ("limit", "sell", 1.2345, 0.05, "IOC")
+
+
+def test_chart_history_and_scroll_back(tmp_path):
+    class Hist:
+        async def fetch_ohlcv(self, symbol, tf, since=None, limit=1000):
+            assert tf == "1m" and limit == 1000
+            return [[t, 1, 2, 0.5, 1.5, 9] for t in range(since, since + limit * 60_000 + 1, 60_000)]
+
+    async def go():
+        eng = Engine(EnvSettings(feed="demo", data_dir=str(tmp_path)), Store(":memory:"))
+        await eng.start()
+        now_bars = await eng.candles()
+        eng.exchange = Hist()
+        before = now_bars[0]["t"]
+        older = await eng.candles(before)
+        st = await eng.status()
+        await eng.stop()
+        return now_bars, older, before, st
+
+    now_bars, older, before, st = asyncio.run(go())
+    assert len(now_bars) >= 60 and [b["t"] for b in now_bars] == sorted(b["t"] for b in now_bars)
+    assert len(older) == 1000 and all(b["t"] < before for b in older)   # strictly older, no overlap
+    assert len(st["book"]["candles"]) == 2                              # status only carries the live tail

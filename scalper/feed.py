@@ -52,7 +52,7 @@ class BinanceFeed(FeedBase):
         self.ex, self.ccxt_symbol = exchange, ccxt_symbol
 
     async def _load_candles(self) -> None:
-        rows = await self.ex.fetch_ohlcv(self.ccxt_symbol, "1m", limit=120)
+        rows = await self.ex.fetch_ohlcv(self.ccxt_symbol, "1m", limit=1000)  # ~17 hours, Binance's max
         now_ms = time.time() * 1000
         for t, o, h, l, c, v in rows:
             self.candles.upsert(Candle(int(t), o, h, l, c, v or 0, t + 60_000 <= now_ms))

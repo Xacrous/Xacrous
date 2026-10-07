@@ -33,7 +33,12 @@
     <div class="card"><div class="label">Result</div><div class="value" id="pnl">—</div><div class="sub" id="pnl-sub"></div></div>
   </section>
 
-  <section class="grid3">
+  <section class="panel">
+    <div class="panel-head"><h2>1-minute chart</h2><span class="muted" id="chart-meta">entry · profit lock · stop</span></div>
+    <div id="chart"></div>
+  </section>
+
+  <section class="grid2 book-row">
     <div class="panel">
       <div class="panel-head"><h2>Order book</h2><span class="muted" id="book-meta"></span></div>
       <div class="ladder" id="asks"></div>
@@ -55,10 +60,6 @@
       <p class="muted" id="blockers"></p>
     </div>
 
-    <div class="panel">
-      <div class="panel-head"><h2>1-minute chart</h2><span class="muted">entry · profit lock · stop</span></div>
-      <div id="chart"></div>
-    </div>
   </section>
 
   <section class="panel">
