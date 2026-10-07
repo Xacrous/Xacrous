@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Binance Scalper</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22%3E%3Ctext y=%22.9em%22 font-size=%2290%22%3E%E2%9A%A1%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/lib/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+<header>
+  <div class="brand">⚡ Order Book Scalper <span id="mode" class="pill">—</span></div>
+  <form id="symbol-form" class="symbol-form">
+    <input id="symbol" name="symbol" placeholder="BTCUSDT" maxlength="20" autocomplete="off" spellcheck="false" aria-label="Symbol">
+    <button>Switch</button>
+  </form>
+  <div class="actions">
+    <button id="btn-start" class="primary">Start</button>
+    <button id="btn-pause">Pause</button>
+    <button id="btn-close" class="danger" title="Exit the open trade at market now">Close trade</button>
+  </div>
+</header>
+
+<main>
+  <div id="banner" class="banner hidden"></div>
+
+  <section class="cards">
+    <div class="card"><div class="label">Price</div><div class="value" id="price">—</div><div class="sub" id="price-sub"></div></div>
+    <div class="card"><div class="label">Bot</div><div class="value" id="state">—</div><div class="sub" id="state-sub"></div></div>
+    <div class="card"><div class="label">Open trade</div><div class="value" id="pos">—</div><div class="sub" id="pos-sub"></div></div>
+    <div class="card"><div class="label">Balance</div><div class="value" id="bal">—</div><div class="sub" id="bal-sub"></div></div>
+    <div class="card"><div class="label">Result</div><div class="value" id="pnl">—</div><div class="sub" id="pnl-sub"></div></div>
+  </section>
+
+  <section class="grid3">
+    <div class="panel">
+      <div class="panel-head"><h2>Order book</h2><span class="muted" id="book-meta"></span></div>
+      <div class="ladder" id="asks"></div>
+      <div class="ladder-mid" id="ladder-mid">—</div>
+      <div class="ladder" id="bids"></div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head"><h2>Signal</h2><span class="muted" id="sig-meta"></span></div>
+      <div class="meter-label"><span>Buy-pressure score</span><b id="score-val">—</b></div>
+      <div class="meter big"><div class="zero"></div><div class="mark entry" id="mark-entry"></div><div class="mark exit" id="mark-exit"></div><div class="fill" id="score-fill"></div></div>
+      <div class="meter-label"><span>Book imbalance</span><b id="imb-val">—</b></div>
+      <div class="meter"><div class="zero"></div><div class="fill" id="imb-fill"></div></div>
+      <div class="meter-label"><span>Microprice skew</span><b id="mic-val">—</b></div>
+      <div class="meter"><div class="zero"></div><div class="fill" id="mic-fill"></div></div>
+      <div class="meter-label"><span>Trade flow</span><b id="flow-val">—</b></div>
+      <div class="meter"><div class="zero"></div><div class="fill" id="flow-fill"></div></div>
+      <ul class="checks" id="checks"></ul>
+      <p class="muted" id="blockers"></p>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head"><h2>1-minute chart</h2><span class="muted">entry · take-profit · stop</span></div>
+      <div id="chart"></div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2>Performance</h2><span class="muted" id="perf-meta"></span></div>
+    <div class="stats" id="stats"></div>
+  </section>
+
+  <section class="grid2">
+    <div class="panel"><h2>Trades</h2><table class="data" id="trades"></table></div>
+    <div class="panel"><h2>Activity</h2><table class="data" id="events"></table></div>
+  </section>
+
+  <section class="panel">
+    <details id="settings-box">
+      <summary><h2>Settings</h2></summary>
+      <form id="settings" class="settings" novalidate>
+        <fieldset><legend>Trade</legend>
+          <label>Order size <span class="unit" data-unit="quote"></span><input name="order_quote" type="number" step="any" min="0"></label>
+          <label>Minimum profit, net of fees (%)<input name="min_profit_pct" type="number" step="any" min="0.12"></label>
+          <label>Stop loss (%)<input name="stop_loss_pct" type="number" step="any" min="0.05"></label>
+          <label>Max hold (seconds)<input name="max_hold_s" type="number" min="10"></label>
+          <label>Buy order timeout (seconds)<input name="entry_timeout_s" type="number" min="2"></label>
+          <label>Pause between trades (seconds)<input name="cooldown_s" type="number" min="0"></label>
+          <label class="check"><input name="use_maker_entry" type="checkbox"> Buy with post-only limit orders (lower fee)</label>
+        </fieldset>
+        <fieldset><legend>Risk limits</legend>
+          <label>Max trades per hour<input name="max_trades_per_hour" type="number" min="1"></label>
+          <label>Max daily loss <span class="unit" data-unit="quote"></span><input name="max_daily_loss" type="number" step="any" min="0"></label>
+          <label>Stop after losses in a row<input name="max_consecutive_losses" type="number" min="1"></label>
+        </fieldset>
+        <fieldset><legend>Signal</legend>
+          <label>Buy when score ≥<input name="signal.entry_score" type="number" step="any" min="0.05" max="1"></label>
+          <label>…for (seconds)<input name="signal.confirm_s" type="number" step="any" min="0"></label>
+          <label>Exit if score ≤<input name="signal.exit_score" type="number" step="any" min="-1" max="-0.05"></label>
+          <label>…for (seconds)<input name="signal.exit_confirm_s" type="number" step="any" min="0"></label>
+          <label>Max spread (bps)<input name="signal.max_spread_bps" type="number" step="any" min="0.1"></label>
+          <label>Book depth window (bps)<input name="signal.depth_bps" type="number" step="any" min="1"></label>
+          <label>Trade flow window (s)<input name="signal.flow_window_s" type="number" step="any" min="5"></label>
+          <label>Min trades in window<input name="signal.min_trades" type="number" min="0"></label>
+          <label>1m range ≥ target ×<input name="signal.min_vol_mult" type="number" step="any" min="0"></label>
+          <label class="check"><input name="signal.trend_filter" type="checkbox"> Only buy above the 1m EMA</label>
+        </fieldset>
+        <fieldset><legend>Paper trading</legend>
+          <label>Starting balance <span class="unit" data-unit="quote"></span><input name="paper_balance" type="number" step="any" min="0"></label>
+          <label>Maker fee (%)<input name="paper_maker_fee" type="number" step="any" min="0"></label>
+          <label>Taker fee (%)<input name="paper_taker_fee" type="number" step="any" min="0"></label>
+        </fieldset>
+        <div class="settings-foot"><button class="primary">Save settings</button><span id="settings-msg" class="muted"></span></div>
+      </form>
+    </details>
+  </section>
+  <p class="disclaimer">Scalping is high risk. Fees, slippage and fast moves can turn a small edge into steady losses. Test in paper mode first.</p>
+</main>
+<script src="/static/app.js"></script>
+</body>
+</html>
