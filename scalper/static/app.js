@@ -69,7 +69,14 @@ function render(s) {
   S = s;
   const t = s.trader, m = s.market, sg = t?.signal, st = s.settings;
   const mode = s.demo ? 'demo' : s.account;
-  if (m) pd = Math.max(0, Math.min(10, Math.round(-Math.log10(m.tick))));
+  if (m) {
+    const d = Math.max(0, Math.min(10, Math.round(-Math.log10(m.tick))));
+    if (d !== pd || !candleSeries.__fmt) {  // chart axis and price lines use the symbol's tick size
+      pd = d;
+      candleSeries.applyOptions({ priceFormat: { type: 'price', precision: pd, minMove: m.tick } });
+      candleSeries.__fmt = true;
+    }
+  }
   $('mode').textContent = (s.demo ? 'DEMO · ' : '') + s.account.toUpperCase();
   $('mode').className = 'pill ' + mode;
   if (lastSymbol !== st.symbol) { lastSymbol = st.symbol; $('symbol').value = st.symbol; candleSeries.setData([]); }

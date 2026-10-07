@@ -124,12 +124,13 @@ class DemoFeed(FeedBase):
         bid = math.floor(mid / self.tick) * self.tick
         ask = bid + self.tick
         tilt = 1 + self.pressure
-        bids = [(bid - i * self.tick, r.uniform(0.5, 3) * tilt * (1 + i / 10)) for i in range(20)]
-        asks = [(ask + i * self.tick, r.uniform(0.5, 3) * (2 - tilt) * (1 + i / 10)) for i in range(20)]
+        unit = 100 / mid  # level sizes worth roughly $50-$300 whatever the coin's price
+        bids = [(bid - i * self.tick, r.uniform(0.5, 3) * unit * tilt * (1 + i / 10)) for i in range(20)]
+        asks = [(ask + i * self.tick, r.uniform(0.5, 3) * unit * (2 - tilt) * (1 + i / 10)) for i in range(20)]
         self._set_book([(round(p, 8), max(q, 0.01)) for p, q in bids], [(round(p, 8), max(q, 0.01)) for p, q in asks])
         for _ in range(r.randint(0, 4)):
             buy = r.random() < 0.5 + self.pressure / 2.5
-            self._trade(now, ask if buy else bid, r.uniform(0.01, 0.5), not buy)
+            self._trade(now, ask if buy else bid, r.uniform(0.01, 0.5) * 100 / mid, not buy)
         t = int(now // 60 * 60_000)
         c = self.candles.items.get(t)
         if c is None:

@@ -168,4 +168,6 @@ run.py, start.bat    launcher
 
 * **Tests:** `pip install -r requirements-dev.txt && pytest`
 * **Offline demo:** `FEED=demo` in `.env` runs the dashboard on a synthetic
-  market, for UI testing only. Its results mean nothing.
+  market, for UI testing only. Its results mean nothing. `DEMO_PRICE` and
+  `DEMO_TICK` mimic other coins, e.g. `DEMO_PRICE=0.35` and
+  `DEMO_TICK=0.0001` for a low-priced coin like ARK.

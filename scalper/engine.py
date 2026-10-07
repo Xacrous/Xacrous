@@ -74,8 +74,9 @@ class Engine:
         try:
             if self.env.feed == "demo":
                 base, quote = _split_symbol(p.symbol)
-                self.market = MarketInfo(p.symbol, f"{base}/{quote}", base, quote, 0.01, 0.0001, 0.0001, 5.0)
-                self.feed = DemoFeed(flow, candles)
+                step = 0.1 if self.env.demo_price < 10 else 0.0001
+                self.market = MarketInfo(p.symbol, f"{base}/{quote}", base, quote, self.env.demo_tick, step, step, 5.0)
+                self.feed = DemoFeed(flow, candles, start_price=self.env.demo_price, tick=self.env.demo_tick)
             else:
                 self.exchange = make_exchange(self.env, keyed=self.env.mode == "live")
                 await self.exchange.load_markets()

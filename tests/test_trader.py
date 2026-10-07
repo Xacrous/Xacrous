@@ -215,3 +215,34 @@ def test_lot_rounding_dust_does_not_inflate_take_profit():
     assert trade["pnl_pct"] >= 0.12
     carry = store.get("paper:BTCUSDT:carry")
     assert carry["qty"] > 0 and carry["cost"] > 0                         # dust remembered for next sell
+
+
+def test_low_priced_coin_with_coarse_tick():
+    # ARKUSDT-like: price ~0.35, tick 0.0001 (~2.9 bps), lot step 0.1
+    clock = Clock()
+    m = MarketInfo("ARKUSDT", "ARK/USDT", "ARK", "USDT", tick=0.0001, step=0.1, min_qty=0.1, min_notional=5)
+    params = TradeParams(symbol="ARKUSDT", order_quote=20, cooldown_s=0,
+                         signal=SignalParams(confirm_s=0, min_trades=1, trend_filter=False))
+    flow, candles = TradeFlow(), Candles()
+    for i in range(20):
+        candles.upsert(Candle(i * 60_000, 0.35, 0.352, 0.348, 0.35, 1, True))
+    store = Store(":memory:")
+    broker = PaperBroker(m, 1000, 0.10, 0.10)
+    t = Trader(params, m, broker, store, flow, candles, clock=clock)
+    run(t.start())
+    t.set_enabled(True)
+    for _ in range(5):
+        flow.add(clock.t, 0.35, 100, False)
+    b = Book([(0.3500 - i * 0.0001, 5000) for i in range(5)], [(0.3501 + i * 0.0001, 800) for i in range(5)])
+    feed(t, broker, b)
+    assert t.buy["price"] == pytest.approx(0.35)            # 1-tick spread: joins the bid, never crosses
+    broker.on_trade(0.3499)
+    feed(t, broker, b)
+    pos = t.pos
+    net = (pos["tp_price"] * (1 - t.maker) / pos["unit_cost"] - 1) * 100
+    assert 0.12 <= net < 0.12 + 0.03                        # at most one 2.9 bps tick above the target
+    assert pos["tp_price"] == pytest.approx(round(pos["tp_price"], 4))   # on the tick grid
+    assert pos["sell_qty"] == pytest.approx(round(pos["sell_qty"], 1))  # on the lot grid
+    broker.on_trade(pos["tp_price"] + 0.0001)
+    feed(t, broker, b)
+    assert store.trades()[0]["pnl_pct"] >= 0.12

@@ -34,6 +34,8 @@ class EnvSettings:
     port: int = 8080
     data_dir: str = "data"
     feed: str = "binance"          # "demo" = synthetic market for trying the dashboard offline
+    demo_price: float = 100.0      # demo feed only: starting price and tick size, e.g. 0.35 / 0.0001
+    demo_tick: float = 0.01
 
     def validate(self) -> None:
         if self.mode not in ("paper", "live"):
@@ -52,7 +54,8 @@ def load_env() -> EnvSettings:
     e = os.environ.get
     s = EnvSettings(mode=e("MODE", "paper").lower(), testnet=_bool(e("TESTNET")), api_key=e("API_KEY", ""),
                     api_secret=e("API_SECRET", ""), host=e("HOST", "127.0.0.1"), port=int(e("PORT", "8080")),
-                    data_dir=e("DATA_DIR", "data"), feed=e("FEED", "binance").lower())
+                    data_dir=e("DATA_DIR", "data"), feed=e("FEED", "binance").lower(),
+                    demo_price=float(e("DEMO_PRICE", "100")), demo_tick=float(e("DEMO_TICK", "0.01")))
     s.validate()
     return s
 
