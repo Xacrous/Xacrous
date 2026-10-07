@@ -184,6 +184,7 @@ def test_chart_history_and_scroll_back(tmp_path):
     async def go():
         eng = Engine(EnvSettings(feed="demo", data_dir=str(tmp_path)), Store(":memory:"))
         await eng.start()
+        await asyncio.sleep(0.5)  # let the demo feed publish its first order book
         now_bars = await eng.candles()
         eng.exchange = Hist()
         before = now_bars[0]["t"]
