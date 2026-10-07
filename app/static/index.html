@@ -14,10 +14,12 @@
   <div class="actions">
     <button id="btn-run" title="Check the latest daily close now (safe to repeat)">Check now</button>
     <button id="btn-pause" class="danger">Pause trading</button>
+    <button id="btn-logout">Log out</button>
   </div>
 </header>
 
 <main>
+  <div id="account" class="banner hidden"></div>
   <section class="cards">
     <div class="card"><div class="label">Price</div><div class="value" id="price">—</div><div class="sub" id="symbol"></div></div>
     <div class="card"><div class="label">Position</div><div class="value" id="position">—</div><div class="sub" id="position-sub"></div></div>

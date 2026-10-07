@@ -13,6 +13,7 @@ from .store import Store
 from .strategy import evaluate
 
 MIN_POSITION_VALUE = 5.0  # below this (in quote currency) a leftover balance counts as flat
+RECHECK_ACCOUNT_MS = 6 * 3600 * 1000  # re-check API key permissions every 6 hours
 
 
 class FileData:
@@ -66,6 +67,20 @@ class Engine:
     def __init__(self, settings: Settings, store: Store, broker, market):
         self.s, self.store, self.broker, self.market = settings, store, broker, market
         self._lock = threading.Lock()
+        self._check_account_switch()
+
+    def _check_account_switch(self) -> None:
+        """Positions belong to one account. Switching paper/testnet/live (or market) starts clean and paused."""
+        account = f"{self.broker.mode}:{self.s.exchange}:{self.s.symbol}"
+        previous = self.store.get("account")
+        if previous is not None and previous != account:
+            self.store.set("position_qty", 0.0)
+            self.store.set("last_signal", None)
+            self.store.set("connection", None)
+            self.store.set("paused", True)
+            self.store.log(f"Account changed from {previous} to {account}: position tracking reset "
+                           f"and trading paused. Check the dashboard, then press Resume.", "warn")
+        self.store.set("account", account)
 
     # ----- state -------------------------------------------------------------
     @property
@@ -78,6 +93,20 @@ class Engine:
 
     def position_qty(self) -> float:
         return float(self.store.get("position_qty", 0.0))
+
+    def verify_connection(self) -> dict:
+        """Check the exchange account (keys, permissions) and remember the result."""
+        info = self.broker.verify()
+        previous = self.store.get("connection") or {}
+        self.store.set("connection", info)
+        if info["ok"] and not previous.get("ok"):
+            note = "" if info.get("ip_restricted") in (None, True) else \
+                " WARNING: the API key is not restricted to this server's IP address."
+            self.store.log(f"Exchange account check passed ({info['account']}).{note}",
+                           "warn" if note else "info")
+        elif not info["ok"] and info.get("error") != previous.get("error"):
+            self.store.log(f"Exchange account check failed: {info['error']}", "error")
+        return info
 
     # ----- main step ---------------------------------------------------------
     def run_once(self) -> dict:
@@ -103,6 +132,9 @@ class Engine:
             raise RuntimeError("latest closed candle is more than 2 days old; refusing to trade on stale data")
 
         price = self.market.price()
+        conn = self.store.get("connection") or {}
+        if not conn.get("ok") or time.time() * 1000 - conn.get("checked", 0) > RECHECK_ACCOUNT_MS:
+            conn = self.verify_connection()
         held = self.position_qty()
         in_pos = held * price >= MIN_POSITION_VALUE
         sig = evaluate([c.close for c in candles], in_pos, self.s.params)
@@ -113,6 +145,8 @@ class Engine:
             if new_candle and sig.action != "HOLD":
                 self.store.log(f"{sig.action} signal ignored because trading is paused ({sig.reason})", "warn")
             result["action"] = "PAUSED"
+        elif sig.action != "HOLD" and not conn.get("ok"):
+            raise RuntimeError(f"{sig.action} signal not traded: exchange account check failed ({conn.get('error')})")
         elif sig.action == "BUY":
             self._buy(price, last, sig.reason)
         elif sig.action == "SELL":
@@ -180,6 +214,8 @@ class Engine:
             "paper_start": self.s.paper_start_quote if self.broker.mode == "paper" else None,
             "allocation": self.s.allocation,
             "params": self.s.params.to_dict(),
+            "connection": self.store.get("connection"),
+            "testnet": self.broker.mode == "testnet",
             "last_signal": self.store.get("last_signal"),
             "last_check": last_check,
             "next_check": last_check + int(self.s.check_interval_min * 60_000) if last_check else None,

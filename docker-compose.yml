@@ -1,0 +1,51 @@
+# Production stack: the bot (private) behind Caddy (public, automatic HTTPS).
+#   docker compose up -d --build
+services:
+  bot:
+    build: .
+    env_file: .env
+    environment:
+      DB_PATH: /data/bot.db
+    volumes:
+      - bot-data:/data
+    # No "ports:" on purpose. The bot is reachable only through Caddy on the private network.
+    networks: [internal]
+    restart: unless-stopped
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    mem_limit: 512m
+    logging: &logging
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  caddy:
+    image: caddy:2
+    depends_on: [bot]
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in .env}
+      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL in .env}
+      ALLOWED_IPS: ${ALLOWED_IPS:-0.0.0.0/0 ::/0}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks: [internal]
+    restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    logging: *logging
+
+networks:
+  internal:
+
+volumes:
+  bot-data:
+  caddy-data:
+  caddy-config:

@@ -1,0 +1,23 @@
+# Caddy gets and renews a Let's Encrypt certificate for $DOMAIN automatically
+# and redirects http:// to https://.
+{
+	email {$ACME_EMAIL}
+}
+
+{$DOMAIN} {
+	# Optional allow-list: set ALLOWED_IPS in .env (space separated, e.g. "203.0.113.7/32")
+	# to refuse everyone else before they even see the login page.
+	@denied not remote_ip {$ALLOWED_IPS}
+	respond @denied "Forbidden" 403
+
+	encode zstd gzip
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+	reverse_proxy bot:8000
+	log {
+		output stdout
+		format console
+	}
+}

@@ -51,8 +51,9 @@ class Store:
 
     def log(self, message: str, level: str = "info") -> None:
         with self._lock, self._db:
-            self._db.execute("INSERT INTO events(ts, level, message) VALUES(?, ?, ?)",
-                             (int(time.time() * 1000), level, message))
+            cur = self._db.execute("INSERT INTO events(ts, level, message) VALUES(?, ?, ?)",
+                                   (int(time.time() * 1000), level, message[:1000]))
+            self._db.execute("DELETE FROM events WHERE id <= ?", (cur.lastrowid - 5000,))  # keep the last 5000
 
     def events(self, limit: int = 100) -> list[dict]:
         with self._lock:

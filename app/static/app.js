@@ -4,11 +4,14 @@ const day = (ms) => new Date(ms).toISOString().slice(0, 10);
 const when = (ms) => ms ? new Date(ms).toLocaleString() : '—';
 const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 
-async function api(path, opts) {
-  const r = await fetch(path, opts);
+async function api(path, opts = {}) {
+  const r = await fetch(path, { ...opts, headers: { 'X-Requested-With': 'btcbot', ...(opts.headers || {}) } });
+  if (r.status === 401) { location.href = '/login'; throw new Error('login required'); }
   if (!r.ok) throw new Error(`${path}: ${r.status}`);
   return r.json();
 }
+const post = (path) => api(path, { method: 'POST' });
+const esc = (t) => String(t ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 let status = null;
 let priceChart, candleSeries, smaSeries, entrySeries, exitSeries, eqChart, eqSeries, bhSeries;
@@ -45,8 +48,10 @@ function initCharts() {
 async function loadStatus() {
   status = await api('/api/status');
   const s = status;
-  $('mode').textContent = s.mode.toUpperCase();
-  $('mode').className = 'pill ' + s.mode;
+  const modeName = s.testnet ? 'testnet' : s.mode;
+  $('mode').textContent = modeName.toUpperCase();
+  $('mode').className = 'pill ' + modeName;
+  renderAccount(s);
   $('paused').classList.toggle('hidden', !s.paused);
   $('btn-pause').textContent = s.paused ? 'Resume trading' : 'Pause trading';
   $('price').textContent = fmt(s.price);
@@ -68,6 +73,23 @@ async function loadStatus() {
     $('lv-exit').textContent = fmt(sig.exit_level);
   }
   $('checks').textContent = `last check ${when(s.last_check)} · next ${when(s.next_check)}`;
+}
+
+function renderAccount(s) {
+  const c = s.connection, el = $('account');
+  if (s.mode === 'paper' || !c) { el.classList.add('hidden'); return; }
+  el.classList.remove('hidden');
+  if (!c.ok) {
+    el.className = 'banner bad';
+    el.textContent = `Exchange account check failed, so the bot will not trade: ${c.error}`;
+  } else if (c.ip_restricted === false) {
+    el.className = 'banner warn';
+    el.textContent = 'Connected to Binance, but this API key is not restricted to your server\'s IP address. Add the IP restriction in Binance API Management.';
+  } else {
+    el.className = 'banner good';
+    el.textContent = `Connected to ${s.testnet ? 'Binance Spot Testnet' : 'Binance'} · spot trading on · withdrawals off` +
+      (c.ip_restricted ? ' · IP restricted' : '') + ` · checked ${when(c.checked)}`;
+  }
 }
 
 async function loadChart(btTrades) {
@@ -128,14 +150,14 @@ async function loadBacktest(query = '') {
 function renderOrders(orders) {
   $('orders').innerHTML = '<tr><th>Time</th><th>Side</th><th>Qty</th><th>Price</th><th>Value</th><th>Mode</th></tr>' +
     (orders.length ? orders.map(o => `<tr><td>${when(o.ts)}</td><td class="${o.side === 'BUY' ? 'buy' : 'sell'}">${o.side}</td>
-      <td>${fmt(o.qty, 6)}</td><td>${fmt(o.price)}</td><td>${fmt(o.cost)}</td><td>${o.mode}</td></tr>`).join('')
+      <td>${fmt(o.qty, 6)}</td><td>${fmt(o.price)}</td><td>${fmt(o.cost)}</td><td>${esc(o.mode)}</td></tr>`).join('')
       : '<tr><td colspan="6" class="muted">No orders yet</td></tr>');
 }
 
 async function loadEvents() {
   const ev = await api('/api/events');
   $('events').innerHTML = '<tr><th>Time</th><th>Message</th></tr>' +
-    ev.map(e => `<tr class="${e.level}"><td>${when(e.ts)}</td><td>${e.message.replace(/</g, '&lt;')}</td></tr>`).join('');
+    ev.map(e => `<tr class="${esc(e.level)}"><td>${when(e.ts)}</td><td>${esc(e.message)}</td></tr>`).join('');
 }
 
 async function refresh(withBacktest = false) {
@@ -148,10 +170,11 @@ async function refresh(withBacktest = false) {
   } catch (e) { console.error(e); }
 }
 
-$('btn-run').onclick = async () => { $('btn-run').disabled = true; try { await api('/api/run', { method: 'POST' }); } finally { $('btn-run').disabled = false; refresh(); } };
+$('btn-run').onclick = async () => { $('btn-run').disabled = true; try { await post('/api/run'); } finally { $('btn-run').disabled = false; refresh(); } };
+$('btn-logout').onclick = async () => { await post('/api/logout').catch(() => {}); location.href = '/login'; };
 $('btn-pause').onclick = async () => {
   const pausing = !status?.paused;
-  if (pausing || confirm('Resume automatic trading?')) { await api(pausing ? '/api/pause' : '/api/resume', { method: 'POST' }); refresh(); }
+  if (pausing || confirm('Resume automatic trading?')) { await post(pausing ? '/api/pause' : '/api/resume'); refresh(); }
 };
 $('bt-form').onsubmit = async (e) => {
   e.preventDefault();

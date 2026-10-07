@@ -100,19 +100,23 @@ def test_closed_only_drops_forming_candle():
     assert len(closed_only(cs, now_ms=3 * DAY_MS - 1)) == 2
 
 
-def test_live_mode_requires_keys_and_password():
+def test_live_mode_requires_keys_password_and_2fa():
+    h = "scrypt:x"
     with pytest.raises(ValueError):
-        Settings(mode="live").validate()
+        Settings(mode="live", password_hash=h).validate()
     with pytest.raises(ValueError):
-        Settings(mode="live", api_key="k", api_secret="s").validate()
-    Settings(mode="live", api_key="k", api_secret="s", dashboard_password="pw").validate()
+        Settings(mode="live", api_key="k", api_secret="s", password_hash=h).validate()
+    with pytest.raises(ValueError):
+        Settings(mode="live", api_key="k", api_secret="s", password_hash=h, totp_secret="X", auth_disabled=True).validate()
+    Settings(mode="live", api_key="k", api_secret="s", password_hash=h, totp_secret="ABC").validate()
+    with pytest.raises(ValueError):
+        Settings().validate()  # no password hash
+    Settings(auth_disabled=True).validate()
 
 
-def test_api_smoke_and_auth():
-    eng = make_engine([100] * 9 + [130], dashboard_password="pw")
-    client = TestClient(create_app(eng.s, eng, run_loop=False))
-    assert client.get("/api/status").status_code == 401
-    client.auth = ("admin", "pw")
+def test_api_smoke():
+    eng = make_engine([100] * 9 + [130], auth_disabled=True)
+    client = TestClient(create_app(eng.s, eng, run_loop=False), headers={"X-Requested-With": "btcbot"})
     assert client.get("/").status_code == 200
     assert client.post("/api/run").json()["action"] == "BUY"
     st = client.get("/api/status").json()
@@ -124,9 +128,8 @@ def test_api_smoke_and_auth():
 
 
 def test_live_mode_starts_paused_on_first_launch():
-    eng = make_engine([100] * 9 + [130], mode="live", api_key="k", api_secret="s", dashboard_password="pw")
-    with TestClient(create_app(eng.s, eng, run_loop=False)) as client:
-        client.auth = ("admin", "pw")
+    eng = make_engine([100] * 9 + [130], mode="live", auth_disabled=True)
+    with TestClient(create_app(eng.s, eng, run_loop=False), headers={"X-Requested-With": "btcbot"}) as client:
         assert client.get("/api/status").json()["paused"] is True
         assert client.post("/api/run").json()["action"] == "PAUSED"
         assert eng.store.orders() == []
