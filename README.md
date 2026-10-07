@@ -2,9 +2,11 @@
 
 A bot that scalps any Binance spot pair you type in (`BTCUSDT`, `ETHBTC`,
 `SOLUSDT`…). It reads the live order book and trade flow and buys when
-short-term buying pressure builds. It sells at a take-profit worth **at
-least 0.12% after fees**, or exits early to cut a loss. It runs on your
-own Windows PC, with a dashboard in your browser.
+short-term buying pressure builds. Once a trade reaches **0.12% profit
+after fees**, that profit is locked in and the bot **follows the price up**
+for as long as it keeps rising. If the trade goes the wrong way first, it
+exits early to cut the loss. It runs on your own Windows PC, with a
+dashboard in your browser.
 
 ![dashboard](docs/dashboard.png)
 
@@ -31,7 +33,7 @@ to +1 (buying pressure)** by combining three readings:
 * The score is **≥ +0.35 for 2 seconds** in a row.
 * The spread is ≤ 5 bps, so the market is liquid enough.
 * At least 10 trades happened in the last 30 seconds.
-* The average 1-minute candle range is at least 1.5× the move needed for the take-profit, so the target can realistically be reached.
+* The average 1-minute candle range is at least 1.5× the move needed to reach the minimum profit, so it can realistically be reached.
 * Price is above the 1-minute EMA(20). This trend filter is optional.
 * No risk limit has been hit (see below).
 
@@ -39,23 +41,39 @@ to +1 (buying pressure)** by combining three readings:
 1. **Buy:** a post-only limit order at the best bid, or one tick better.
    It pays the cheaper maker fee and never crosses the spread. If it
    isn't filled within 15 s, or the signal fades, it is cancelled.
-2. **Take-profit:** as soon as the buy fills, a post-only limit sell is
-   placed at the price that nets **≥ 0.12% after both fees**. With
-   Binance's standard 0.10% fees, that is about **+0.32%** above the entry
-   price; with the BNB discount (0.075%), about +0.27%. The bot reads your
-   actual fee rates from Binance.
-3. **Early exit at market** if any of these happen:
+2. **Lock the minimum, then let it run.** The *profit lock* is the price
+   that nets **0.12% after both fees**. With Binance's standard 0.10% fees,
+   that is about **+0.32%** above the entry price; with the BNB discount
+   (0.075%), about +0.27%. The bot reads your actual fee rates from Binance.
+   * **Once price is above the lock, the bot trails it.** It tracks the
+     highest price since then and sells when price falls **0.30% below
+     that peak** (the "trail distance"). It **never sells below the lock**.
+     There is no time limit while trailing, so a strong move can run to
+     +1%, +10% or more.
+   * **The minimum is enforced by Binance itself.** The sell is an
+     immediate-or-cancel limit order at the lock price: it fills at that
+     price or better, or not at all. If price gaps through the lock between
+     two checks, the unsold part waits as a resting sell at the
+     0.12%-profit price instead of being sold for less. The stop loss still
+     protects it if price keeps falling.
+   * **Prefer a quick exit?** In Settings, set *When minimum profit is
+     reached* to **Sell right away**. A resting limit sell then sits at the
+     0.12% price from the moment you buy.
+3. **Before the lock is reached, it exits early at market** if any of these happen:
    * **stop loss:** price falls 0.30% below entry;
    * **time limit:** 5 minutes have passed;
    * **book turned bearish:** the score stays ≤ −0.40 for 3 seconds;
    * **manual:** you press **Close trade**.
 
 **What a loss costs:** a stop-loss exit loses about 0.30% plus fees, or
-roughly −0.5% in total. A win nets +0.12% or more. The bot therefore needs
-to win around 4 trades out of 5 just to break even. Raising
-`min_profit_pct` or tightening the stop changes that balance, and the
-dashboard's **Performance** panel shows how your settings are actually
-doing.
+roughly −0.5% in total. A win nets **at least** +0.12%. With the old
+sell-at-0.12% exit, the bot had to win about 4 trades out of 5 just to
+break even. Trailing lowers that bar whenever winners run further, but
+most 1-minute moves are small: expect most winners to land between +0.12%
+and +0.5%, and big runs to be rare. The trail distance is the trade-off.
+Wider gives a run more room but gives back more at the end; tighter keeps
+more of small moves. The dashboard's **Performance** panel shows how your
+settings are actually doing.
 
 **Long only:** spot accounts can't short, so the bot only buys and then
 sells. On `ETHBTC` it buys ETH with BTC and sells it back for more BTC.
@@ -121,9 +139,10 @@ equivalent); the dashboard tells you if your order size is too small.
   hours.
 * **If the PC or internet drops:**
   * An unfilled buy order is cancelled on the next start.
-  * A take-profit sell already on Binance stays there. The bot picks it up
-    again when it restarts.
-  * While the bot is off, there is **no stop loss**.
+  * A resting profit sell already on Binance stays there, and the bot picks
+    it up again when it restarts.
+  * While the bot is off, there is **no stop loss and no trailing**. The
+    trailing exit runs on your PC, not on Binance.
 * **Clock:** Binance rejects requests if your PC clock is off by more than a
   few seconds. In Windows Settings, open **Time & language → Date & time**
   and click **Sync now**.

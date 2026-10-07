@@ -4,10 +4,13 @@ IDLE --signal--> BUYING --filled--> HOLDING --take-profit filled / stop / time /
 
 * Entry: post-only limit buy at the best bid (maker fee), or a market buy if maker
   entry is turned off. Cancelled if not filled within the timeout or the signal fades.
-* Take-profit: as soon as the buy fills, a post-only limit sell is placed at the price
-  that nets at least ``min_profit_pct`` after BOTH fees.
-* Exits at market (taker) on: stop loss, max hold time, order book flipping bearish,
-  or a manual "close now".
+* Profit, two modes:
+  - trail (default): once the price reaches the level that nets ``min_profit_pct`` after
+    both fees, that level becomes a floor and the exit follows the price up, selling when
+    it falls ``trail_pct`` below its peak. No time limit while trailing, so a big move can run.
+  - fixed: a post-only limit sell sits at the price that nets ``min_profit_pct``.
+* Before the profit level is reached, exits at market (taker) on: stop loss, max hold
+  time, order book flipping bearish, or a manual "close now".
 """
 from __future__ import annotations
 
@@ -97,9 +100,13 @@ class Trader:
     def entry_fee(self) -> float:
         return self.maker if self.p.use_maker_entry else self.taker
 
+    @property
+    def exit_fee(self) -> float:
+        return self.taker if self.p.exit_mode == "trail" else self.maker  # trailing exits sell at market
+
     def target_gross_pct(self) -> float:
-        """Price rise needed for the take-profit to net ``min_profit_pct`` after both fees."""
-        return ((1 + self.p.min_profit_pct / 100) / ((1 - self.entry_fee) * (1 - self.maker)) - 1) * 100
+        """Price rise needed to net ``min_profit_pct`` after both fees."""
+        return ((1 + self.p.min_profit_pct / 100) / ((1 - self.entry_fee) * (1 - self.exit_fee)) - 1) * 100
 
     # ----- main step -------------------------------------------------------------------------
     async def step(self, book: Book) -> None:
@@ -216,22 +223,54 @@ class Trader:
         pool_qty, pool_cost = held + carry_qty, cost + carry_cost
         unit = pool_cost / pool_qty
         sell_qty = self.m.qty_down(min(pool_qty, base_free))
+        mode = self.p.exit_mode
+        # The price that nets min_profit_pct: sold by a resting maker order (fixed) or at market (trail).
         tp = self.m.price_up(unit * (1 + self.p.min_profit_pct / 100) / (1 - self.maker))
+        floor = self.m.price_up(unit * (1 + self.p.min_profit_pct / 100) / (1 - self.taker))
         self.pos = {"entry_ts": now, "avg": avg, "unit_cost": unit, "qty": pool_qty, "sell_qty": sell_qty,
-                    "cost": pool_cost, "entry_fee": o["fee_quote"], "tp_price": tp,
+                    "cost": pool_cost, "entry_fee": o["fee_quote"], "mode": mode,
+                    "tp_price": tp if mode == "fixed" else floor, "floor_price": floor,
+                    "trailing": False, "peak": None, "trail_stop": None,
                     "stop_price": avg * (1 - self.p.stop_loss_pct / 100), "tp": None, "sells": []}
         self.buy = None
         self.state = HOLDING
-        self.log(f"Bought {held:g} @ {avg:g}; take-profit {tp:g} (+{(tp / avg - 1) * 100:.3f}%), "
+        target = self.pos["tp_price"]
+        what = "take-profit" if mode == "fixed" else "trailing starts at"
+        self.log(f"Bought {held:g} @ {avg:g}; {what} {target:g} (+{(target / avg - 1) * 100:.3f}%), "
                  f"stop {self.pos['stop_price']:g}")
-        await self._place_tp()
+        if mode == "fixed":
+            await self._place_tp()
         self._persist()
 
     async def _place_tp(self) -> None:
         pos = self.pos
-        if self.book.ready and pos["tp_price"] <= self.book.best_bid:
-            return  # price is already above target: the exit check below sells it
-        pos["tp"] = await self.broker.limit_sell_maker(pos["sell_qty"], pos["tp_price"])
+        price = pos["tp_price"]
+        if self.book.ready and price <= self.book.best_bid:
+            price = self.m.price_up(self.book.best_bid + self.m.tick)  # stay a maker; still >= the minimum
+        pos["tp"] = await self.broker.limit_sell_maker(pos["sell_qty"], price)
+
+    async def _sell_at_least(self, now: float, reason: str) -> None:
+        """Profitable exit that can never sell below the minimum-profit price.
+
+        An immediate-or-cancel limit sell at the floor fills only at the floor or better. If the price
+        has already gapped below it, the unsold part waits as a resting sell at the minimum-profit price
+        (the stop loss still protects it) instead of being dumped for less.
+        """
+        pos = self.pos
+        base_free, _ = await self.broker.balances()
+        qty = self.m.qty_down(min(pos["sell_qty"], base_free))
+        o = await self.broker.limit_sell_ioc(qty, pos["floor_price"])
+        if o["filled"]:
+            pos["sells"].append(o)
+        left = self.m.qty_down(qty - o["filled"])
+        if not left or not self.m.sellable(left, pos["floor_price"]):
+            await self._close_trade(now, reason)
+            return
+        self.log(f"Price fell below the minimum-profit level before the sell; {left:g} {self.m.base} now "
+                 f"waits for {pos['tp_price']:g} with the stop loss still active", "warn")
+        pos.update(mode="fixed", trailing=False, sell_qty=left, timer_start=now)
+        await self._place_tp()
+        self._persist()
 
     # ----- HOLDING -----------------------------------------------------------------------------
     async def _manage_position(self, now: float) -> None:
@@ -249,20 +288,34 @@ class Trader:
                 pos["sell_qty"] = self.m.qty_down(pos["sell_qty"] - pos["tp"]["filled"])
                 pos["tp"] = None
         bid = self.book.best_bid if self.book.ready else None
+        trail = pos.get("mode") == "trail"
+        # Start trailing once the bid is above the floor, so the floor sits below the price (no instant sell).
+        if trail and bid is not None and not pos["trailing"] and bid > pos["floor_price"]:
+            pos.update(trailing=True, peak=bid)
+            self.log(f"Minimum profit reached at {bid:g}: now trailing {self.p.trail_pct:g}% below the peak, "
+                     f"never selling below {pos['floor_price']:g}")
         reason = None
         if self._close_requested:
             reason = "closed manually"
+        elif pos.get("trailing"):
+            if bid is not None:
+                pos["peak"] = max(pos["peak"], bid)
+                stop = max(pos["floor_price"], self.m.price_down(pos["peak"] * (1 - self.p.trail_pct / 100)))
+                if stop != pos["trail_stop"]:
+                    pos["trail_stop"] = stop
+                    self._persist()
+                if bid <= stop:
+                    await self._sell_at_least(now, f"trailing stop (peak {pos['peak']:g})")
+                    return
         elif bid is not None and bid <= pos["stop_price"]:
             reason = "stop loss"
-        elif now - pos["entry_ts"] >= self.p.max_hold_s:
+        elif now - pos.get("timer_start", pos["entry_ts"]) >= self.p.max_hold_s:
             reason = "time limit"
         elif self._bearish_for(now) >= self.p.signal.exit_confirm_s:
             reason = "order book turned bearish"
-        elif pos["tp"] is None and bid is not None and bid >= pos["tp_price"]:
-            reason = "price above take-profit"
         if reason:
             await self._exit_market(now, reason)
-        elif pos["tp"] is None:
+        elif not trail and pos["tp"] is None:
             await self._place_tp()
             self._persist()
 
@@ -339,7 +392,9 @@ class Trader:
         if self.pos:
             bid = self.book.best_bid if self.book.ready else self.pos["avg"]
             value = self.pos["qty"] * bid * (1 - self.taker)  # includes carried dust, as does cost
+            stop = self.pos.get("trail_stop")
             pos = {**{k: v for k, v in self.pos.items() if k not in ("sells",)},
+                   "locked_pct": (stop * (1 - self.taker) / self.pos["unit_cost"] - 1) * 100 if stop else None,
                    "age_s": self.clock() - self.pos["entry_ts"],
                    "unrealized": value - self.pos["cost"],
                    "unrealized_pct": (value / self.pos["cost"] - 1) * 100}

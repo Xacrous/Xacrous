@@ -166,3 +166,10 @@ def test_engine_runs_on_demo_feed(tmp_path):
     s = asyncio.run(go())
     assert s["error"] is None and s["book"] and s["trader"]["state"] == "IDLE"
     assert s["balances"]["quote"] == 1000.0 and s["trader"]["enabled"] is False  # always starts paused
+
+
+def test_binance_ioc_sell_sends_time_in_force():
+    ex = FakeAsyncBinance()
+    asyncio.run(BinanceBroker(ex, M).limit_sell_ioc(1.23456, 0.05))
+    type_, side, qty, price, params = ex.created[0]
+    assert (type_, side, qty, price, params["timeInForce"]) == ("limit", "sell", 1.2345, 0.05, "IOC")

@@ -31,7 +31,7 @@ def book(bid, ask, bq=5.0, aq=1.0, levels=5):
 
 
 def make(clock, **kw):
-    kw = {"order_quote": 100, "cooldown_s": 0, **kw}
+    kw = {"order_quote": 100, "cooldown_s": 0, "exit_mode": "fixed", **kw}
     params = TradeParams(signal=SignalParams(confirm_s=0, min_trades=1, trend_filter=False), **kw)
     flow, candles = TradeFlow(), Candles()
     for i in range(20):  # 1m candles with ~1% range so the volatility filter passes
@@ -163,6 +163,8 @@ def test_target_gross_includes_fees():
     clock = Clock()
     t, *_ = make(clock)
     assert t.target_gross_pct() == pytest.approx(((1.0012) / (0.999 * 0.999) - 1) * 100)
+    t.p.exit_mode, t.taker = "trail", 0.002          # trailing exits pay the taker fee
+    assert t.target_gross_pct() == pytest.approx(((1.0012) / (0.999 * 0.998) - 1) * 100)
 
 
 def test_bearish_flip_must_persist_before_exit():
@@ -189,8 +191,8 @@ def test_lot_rounding_dust_does_not_inflate_take_profit():
     # Real BTCUSDT-like rules: step 0.00001 BTC at ~$100k, so a $20 order is only 20 steps.
     clock = Clock()
     m = MarketInfo("BTCUSDT", "BTC/USDT", "BTC", "USDT", tick=0.01, step=0.00001, min_qty=0.00001, min_notional=5)
-    params = TradeParams(order_quote=20, cooldown_s=0, signal=SignalParams(confirm_s=0, min_trades=1,
-                                                                           trend_filter=False))
+    params = TradeParams(order_quote=20, cooldown_s=0, exit_mode="fixed",
+                         signal=SignalParams(confirm_s=0, min_trades=1, trend_filter=False))
     flow, candles = TradeFlow(), Candles()
     for i in range(20):
         candles.upsert(Candle(i * 60_000, 100_000, 101_000, 99_000, 100_000, 1, True))
@@ -221,7 +223,7 @@ def test_low_priced_coin_with_coarse_tick():
     # ARKUSDT-like: price ~0.35, tick 0.0001 (~2.9 bps), lot step 0.1
     clock = Clock()
     m = MarketInfo("ARKUSDT", "ARK/USDT", "ARK", "USDT", tick=0.0001, step=0.1, min_qty=0.1, min_notional=5)
-    params = TradeParams(symbol="ARKUSDT", order_quote=20, cooldown_s=0,
+    params = TradeParams(symbol="ARKUSDT", order_quote=20, cooldown_s=0, exit_mode="fixed",
                          signal=SignalParams(confirm_s=0, min_trades=1, trend_filter=False))
     flow, candles = TradeFlow(), Candles()
     for i in range(20):
@@ -246,3 +248,84 @@ def test_low_priced_coin_with_coarse_tick():
     broker.on_trade(pos["tp_price"] + 0.0001)
     feed(t, broker, b)
     assert store.trades()[0]["pnl_pct"] >= 0.12
+
+
+# ----- trail mode: 0.12% is a floor, not a cap ------------------------------------------
+def enter_trail(clock, **kw):
+    t, broker, flow, store = make(clock, exit_mode="trail", trail_pct=0.30, max_hold_s=60, **kw)
+    buy_pressure(flow, clock)
+    feed(t, broker, book(100.00, 100.02))
+    broker.on_trade(99.99)
+    feed(t, broker, book(100.00, 100.02))
+    assert t.state == HOLDING and t.pos["tp"] is None      # no resting sell capping the profit
+    return t, broker, flow, store
+
+
+def test_trail_lets_a_big_move_run_past_min_profit():
+    clock = Clock()
+    t, broker, flow, store = enter_trail(clock)
+    floor = t.pos["floor_price"]
+    feed(t, broker, book(floor, floor + 0.02))
+    assert not t.pos["trailing"]                                 # at the floor exactly: keep holding
+    feed(t, broker, book(floor + 0.01, floor + 0.03))
+    assert t.pos["trailing"] and t.pos["trail_stop"] == floor   # minimum profit locked
+    price = floor
+    for _ in range(200):                                         # a strong run: +20%, slowly over 10 min
+        price *= 1.001
+        clock.t += 3
+        feed(t, broker, book(round(price, 2), round(price, 2) + 0.02, bq=1, aq=20))  # even a bearish book
+    assert t.state == HOLDING                                    # no time limit / bearish exit while trailing
+    peak = t.pos["peak"]
+    clock.t += 1
+    feed(t, broker, book(round(peak * 0.996, 2), round(peak * 0.996, 2) + 0.02))   # 0.4% pullback
+    assert t.state == IDLE
+    (trade,) = store.trades()
+    assert trade["reason"].startswith("trailing stop")
+    assert trade["pnl_pct"] > 19                                 # kept most of the +20% move
+
+
+def test_trail_never_exits_below_min_profit_once_reached():
+    clock = Clock()
+    t, broker, flow, store = enter_trail(clock)
+    floor = t.pos["floor_price"]
+    feed(t, broker, book(floor + 0.05, floor + 0.07))           # just above the floor: trailing
+    clock.t += 1
+    feed(t, broker, book(floor, floor + 0.02))                  # back to the floor -> sell there
+    (trade,) = store.trades()
+    assert trade["pnl_pct"] >= 0.12 - 1e-9
+
+
+def test_trail_still_uses_stop_loss_before_min_profit():
+    clock = Clock()
+    t, broker, flow, store = enter_trail(clock)
+    clock.t += 1
+    feed(t, broker, book(99.60, 99.62))
+    assert store.trades()[0]["reason"] == "stop loss"
+
+
+def test_trail_gap_below_floor_never_sells_under_min_profit():
+    clock = Clock()
+    t, broker, flow, store = enter_trail(clock)
+    floor = t.pos["floor_price"]
+    feed(t, broker, book(floor + 0.10, floor + 0.12))           # trailing, floor locked
+    clock.t += 1
+    feed(t, broker, book(floor - 0.03, floor - 0.01))           # price gaps straight through the floor
+    assert t.state == HOLDING and store.trades() == []          # nothing sold below the minimum
+    assert t.pos["tp"]["status"] == "open" and t.pos["tp"]["price"] >= t.pos["tp_price"]
+    broker.on_trade(t.pos["tp"]["price"] + 0.01)                # price comes back
+    clock.t += 1
+    feed(t, broker, book(floor, floor + 0.02))
+    assert store.trades()[0]["pnl_pct"] >= 0.12
+
+
+def test_trail_exit_ioc_partial_fill_keeps_the_rest_resting():
+    clock = Clock()
+    t, broker, flow, store = enter_trail(clock)
+    floor = t.pos["floor_price"]
+    feed(t, broker, book(floor + 0.10, floor + 0.12))
+    clock.t += 1
+    qty = t.pos["sell_qty"]
+    thin = Book([(floor, qty / 2), (floor - 0.05, 100)], [(floor + 0.02, 1)])  # only half fits at >= floor
+    feed(t, broker, thin)
+    assert t.state == HOLDING and t.pos["sell_qty"] == pytest.approx(broker.m.qty_down(qty / 2), abs=1e-5)
+    assert t.pos["sells"][0]["filled"] == pytest.approx(qty / 2, rel=1e-3)

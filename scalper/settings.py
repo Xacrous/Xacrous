@@ -67,7 +67,9 @@ SYMBOL_RE = re.compile(r"^[A-Z0-9]{2,20}$")
 class TradeParams:
     symbol: str = "BTCUSDT"
     order_quote: float = 20.0          # size of each buy, in the quote coin (USDT for BTCUSDT, BTC for ETHBTC)
-    min_profit_pct: float = 0.12       # take-profit, NET of both fees
+    min_profit_pct: float = 0.12       # minimum profit to lock in, NET of both fees
+    exit_mode: str = "trail"           # trail = lock min profit, then follow the price up; fixed = sell at min profit
+    trail_pct: float = 0.30            # trail mode: sell when price falls this far below its peak
     stop_loss_pct: float = 0.30        # exit at market if price falls this far below entry
     max_hold_s: float = 300            # exit at market after this long (5 x 1m candles)
     entry_timeout_s: float = 15        # cancel an unfilled buy after this long
@@ -88,6 +90,8 @@ class TradeParams:
             (self.order_quote > 0, "order size must be > 0"),
             (self.min_profit_pct >= 0.12, "minimum profit must be at least 0.12%"),
             (0.05 <= self.stop_loss_pct <= 5, "stop loss must be between 0.05% and 5%"),
+            (self.exit_mode in ("trail", "fixed"), "exit mode must be trail or fixed"),
+            (0.05 <= self.trail_pct <= 50, "trail distance must be between 0.05% and 50%"),
             (10 <= self.max_hold_s <= 3600, "max hold must be 10-3600 s"),
             (2 <= self.entry_timeout_s <= 300, "entry timeout must be 2-300 s"),
             (self.cooldown_s >= 0, "cooldown must be >= 0"),

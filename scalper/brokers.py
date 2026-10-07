@@ -123,6 +123,24 @@ class PaperBroker:
         self.orders[o["id"]] = o
         return dict(o)
 
+    async def limit_sell_ioc(self, qty: float, price: float) -> dict:
+        """Sell now at ``price`` or better; whatever can't fill immediately is cancelled."""
+        qty = min(qty, self.base)
+        filled = value = 0.0
+        for level_price, size in self.book.bids:
+            if level_price < price or filled >= qty:
+                break
+            take = min(size, qty - filled)
+            filled += take
+            value += take * level_price
+        fee = value * self.taker
+        self.base -= filled
+        self.quote += value - fee
+        status = "closed" if filled >= qty - 1e-12 else "canceled"
+        o = _order(next(self._ids), "sell", "limit", price, qty, filled, value, 0.0, fee, status)
+        self.orders[o["id"]] = o
+        return dict(o)
+
     async def fetch(self, order_id: str) -> dict:
         return dict(self.orders[order_id])
 
@@ -222,6 +240,10 @@ class BinanceBroker:
 
     async def market_sell(self, qty: float) -> dict:
         return await self._create("market", "sell", self.m.qty_down(qty))
+
+    async def limit_sell_ioc(self, qty: float, price: float) -> dict:
+        """Sell now at ``price`` or better (taker); Binance cancels whatever can't fill immediately."""
+        return await self._create("limit", "sell", self.m.qty_down(qty), price, {"timeInForce": "IOC"})
 
     async def fetch(self, order_id: str) -> dict:
         return await self._normalise(await self.ex.fetch_order(order_id, self.m.ccxt_symbol))

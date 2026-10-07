@@ -67,7 +67,7 @@ function meter(id, v, valId) {
 /* ---------- render ---------- */
 function render(s) {
   S = s;
-  const t = s.trader, m = s.market, sg = t?.signal, st = s.settings;
+  const t = s.trader, m = s.market, sg = t?.signal, st = s.settings, p = t?.position;
   const mode = s.demo ? 'demo' : s.account;
   if (m) {
     const d = Math.max(0, Math.min(10, Math.round(-Math.log10(m.tick))));
@@ -99,12 +99,14 @@ function render(s) {
   $('state').textContent = t ? (t.enabled ? t.state : (t.state === 'IDLE' ? 'PAUSED' : t.state + ' (paused)')) : 'OFF';
   $('state').className = 'value ' + (t?.state === 'HOLDING' ? 'up' : '');
   $('state-sub').textContent = t ? (t.state === 'BUYING' ? `buy ${sig(t.buy_order.amount)} @ ${px(t.buy_order.price)}` :
-    t.state === 'HOLDING' ? 'waiting for take-profit' : (t.blocker || (sg?.buy ? 'signal ready' : 'scanning'))) : (s.error || '');
+    t.state === 'HOLDING' ? (p?.trailing ? 'profit locked, trailing the price' : p?.mode === 'trail' ? 'waiting for minimum profit' : 'waiting for take-profit') : (t.blocker || (sg?.buy ? 'signal ready' : 'scanning'))) : (s.error || '');
 
-  const p = t?.position;
   $('pos').textContent = p ? `${signed(p.unrealized_pct, 3)}%` : 'none';
   $('pos').className = 'value ' + (p ? (p.unrealized >= 0 ? 'up' : 'down') : '');
-  $('pos-sub').textContent = p ? `${sig(p.qty, 6)} ${m.base} @ ${px(p.avg)} · TP ${px(p.tp_price)} · stop ${px(p.stop_price)} · ${Math.round(p.age_s)}s` : '';
+  $('pos-sub').textContent = !p ? '' : `${sig(p.qty, 6)} ${m.base} @ ${px(p.avg)} · ` + (
+    p.trailing ? `TRAILING · peak ${px(p.peak)} · sells below ${px(p.trail_stop)} (locks ${signed(p.locked_pct, 2)}%)`
+    : p.mode === 'trail' ? `trails above ${px(p.floor_price)} · stop ${px(p.stop_price)}`
+    : `TP ${px(p.tp?.price ?? p.tp_price)} · stop ${px(p.stop_price)}`) + ` · ${Math.round(p.age_s)}s`;
 
   const bal = s.balances;
   $('bal').textContent = bal.quote == null ? '—' : `${sig(bal.quote, 8)} ${m.quote}`;
@@ -117,7 +119,7 @@ function render(s) {
 
   // book
   if (b) {
-    const mine = new Set([t?.buy_order?.price, p?.tp_price].filter(Boolean));
+    const mine = new Set([t?.buy_order?.price, p?.mode === 'fixed' ? p.tp_price : null].filter(Boolean));
     const maxQ = Math.max(...b.bids.map((x) => x[1]), ...b.asks.map((x) => x[1]));
     ladder($('asks'), b.asks.slice(0, 10).reverse(), 'ask', maxQ, mine);
     ladder($('bids'), b.bids.slice(0, 10), 'bid', maxQ, mine);
@@ -126,8 +128,9 @@ function render(s) {
     candleSeries.setData(b.candles.map((c) => ({ time: c.t, open: c.o, high: c.h, low: c.l, close: c.c })));
   }
   setLine('entry', p?.avg || t?.buy_order?.price, css('--blue'), p ? 'entry' : 'buy');
-  setLine('tp', p?.tp_price, css('--up'), 'TP');
-  setLine('stop', p?.stop_price, css('--down'), 'stop');
+  setLine('tp', p && !p.trailing ? p.tp_price : null, css('--up'), p?.mode === 'trail' ? 'min profit' : 'TP');
+  setLine('trail', p?.trailing ? p.trail_stop : null, css('--accent'), 'trail stop');
+  setLine('stop', p && !p.trailing ? p.stop_price : null, css('--down'), 'stop');
 
   // signal
   if (sg) {
@@ -189,7 +192,7 @@ function readSettings() {
   for (const el of $('settings').elements) {
     if (!el.name) continue;
     const [a, b] = el.name.split('.');
-    const v = el.type === 'checkbox' ? el.checked : Number(el.value);
+    const v = el.type === 'checkbox' ? el.checked : el.tagName === 'SELECT' ? el.value : Number(el.value);
     if (b) out[a][b] = v; else out[a] = v;
   }
   return out;
@@ -217,7 +220,17 @@ $('btn-pause').onclick = () => api('/api/pause', {});
 $('btn-close').onclick = () => { if (confirm('Exit the open trade at market price now?')) api('/api/close', {}); };
 
 async function tick() {
-  try { render(await api('/api/status')); } catch (e) { $('banner').classList.remove('hidden'); $('banner').textContent = 'Lost connection to the bot. Is run.py still running?'; }
+  let status;
+  try { status = await api('/api/status'); } catch (e) {
+    $('banner').classList.remove('hidden');
+    $('banner').textContent = 'Lost connection to the bot. Is it still running?';
+    return;
+  }
+  try { render(status); } catch (e) {
+    console.error(e);
+    $('banner').classList.remove('hidden');
+    $('banner').textContent = `Dashboard error: ${e.message}`;
+  }
 }
 initChart();
 tick(); loadTables();
